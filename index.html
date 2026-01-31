@@ -30,7 +30,6 @@
         }
         #status.loading .spinner { display: block; }
         @keyframes spin { to { transform: rotate(360deg); } }
-        .row { display: flex; gap: 16px; align-items: center; }
         label {
             display: flex; align-items: center; gap: 8px;
             cursor: pointer; font-size: 14px; font-weight: 500;
@@ -57,6 +56,21 @@
         }
         button:hover:not(:disabled) { background: #0056b3; transform: translateY(-1px); }
         button:disabled { background: #ccc; cursor: not-allowed; }
+        #catHeader {
+            display: flex; justify-content: space-between; align-items: center;
+            font-size: 13px; color: #666; cursor: pointer; padding: 8px 0;
+        }
+        #catHeader:hover { color: #007bff; }
+        #categories {
+            display: none; flex-direction: column; gap: 4px;
+            max-height: 180px; overflow-y: auto;
+            background: #f8f9fa; border-radius: 8px; padding: 10px;
+        }
+        #categories.visible { display: flex; }
+        #categories label { font-size: 13px; font-weight: 400; padding: 2px 0; }
+        .cat-count { color: #888; font-size: 11px; margin-left: 4px; }
+        .cat-buttons { display: flex; gap: 8px; margin-bottom: 8px; }
+        .cat-buttons button { padding: 4px 10px; font-size: 11px; }
     </style>
 </head>
 <body>
@@ -66,18 +80,29 @@
             <div class="spinner"></div>
             <span>Initializing...</span>
         </div>
-        <div class="row">
-            <label><input type="checkbox" id="placesCheck" checked> Places</label>
-            <label><input type="checkbox" id="buildingsCheck"> Buildings</label>
+        <label><input type="checkbox" id="buildingsCheck"> Load buildings near places</label>
+        <div class="slider-row">
+            <div class="slider-header">
+                <span>Building distance</span>
+                <span class="slider-value" id="distanceValue">0m</span>
+            </div>
+            <input type="range" id="distanceSlider" min="0" max="50" value="0" step="5">
         </div>
         <div class="slider-row">
             <div class="slider-header">
                 <span>Limit</span>
-                <span class="slider-value" id="limitValue">1,000</span>
+                <span class="slider-value" id="limitValue">33,000</span>
             </div>
-            <input type="range" id="limitSlider" min="100" max="50000" value="1000" step="100">
+            <input type="range" id="limitSlider" min="33000" max="1000000" value="33000" step="1000">
         </div>
         <button id="loadBtn" disabled>Load Data</button>
+        <div id="catSection" style="display:none">
+            <div id="catHeader">
+                <span>Categories <span id="catCount"></span></span>
+                <span id="catToggle">▼</span>
+            </div>
+            <div id="categories"></div>
+        </div>
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -85,35 +110,30 @@
         import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
 
         const $ = id => document.getElementById(id);
-        const status = $('status');
-        const loadBtn = $('loadBtn');
-        const placesCheck = $('placesCheck');
-        const buildingsCheck = $('buildingsCheck');
-        const limitSlider = $('limitSlider');
-        const limitValue = $('limitValue');
-
-        limitSlider.oninput = () => limitValue.textContent = parseInt(limitSlider.value).toLocaleString();
-
         const PROXY = `${location.origin}/s3`;
         const RELEASE = '2026-01-21.0';
 
         let conn = null;
-        const layers = L.layerGroup();
-        const fileCache = {};
-        const bboxCache = {}; // file -> {xmin, xmax, ymin, ymax} bounds
+        let placeMarkers = []; // {marker, cat}
+        let buildingMarkers = []; // {layer, cats: Set}
+        const placesLayer = L.layerGroup();
+        const buildingsLayer = L.layerGroup();
+        const CACHE_KEY = `overture_files_${RELEASE}`;
+        const fileCache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
 
-        // Map setup with URL hash
-        function getInitialView() {
-            const [z, lat, lon] = (location.hash.slice(1) || '').split('/').map(Number);
-            return (!isNaN(z) && !isNaN(lat) && !isNaN(lon))
-                ? { center: [lat, lon], zoom: z }
-                : { center: [34.05, -118.25], zoom: 14 };
-        }
+        $('limitSlider').oninput = () => $('limitValue').textContent = parseInt($('limitSlider').value).toLocaleString();
+        $('distanceSlider').oninput = () => $('distanceValue').textContent = $('distanceSlider').value + 'm';
+        $('catHeader').onclick = () => $('categories').classList.toggle('visible');
 
-        const { center, zoom } = getInitialView();
-        const map = L.map('map').setView(center, zoom);
+        // Map setup
+        const [z, lat, lon] = (location.hash.slice(1) || '').split('/').map(Number);
+        const map = L.map('map').setView(
+            (!isNaN(lat) && !isNaN(lon)) ? [lat, lon] : [34.05, -118.25],
+            !isNaN(z) ? z : 14
+        );
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-        layers.addTo(map);
+        placesLayer.addTo(map);
+        buildingsLayer.addTo(map);
 
         map.on('moveend', () => {
             const c = map.getCenter();
@@ -121,35 +141,186 @@
         });
 
         function log(msg, type = 'loading') {
-            status.innerHTML = `<div class="spinner"></div><span>${msg}</span>`;
-            status.className = type;
-            console.log(msg);
+            $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>`;
+            $('status').className = type;
+        }
+
+        function getBbox() {
+            const b = map.getBounds();
+            return { xmin: b.getWest(), xmax: b.getEast(), ymin: b.getSouth(), ymax: b.getNorth() };
+        }
+
+        function bboxWhere(bbox, prefix = '') {
+            const p = prefix ? prefix + '.' : '';
+            return `${p}bbox.xmin >= ${bbox.xmin} AND ${p}bbox.xmax <= ${bbox.xmax} AND ${p}bbox.ymin >= ${bbox.ymin} AND ${p}bbox.ymax <= ${bbox.ymax}`;
         }
 
         async function listFiles(theme, type) {
             const key = `${theme}/${type}`;
             if (fileCache[key]) return fileCache[key];
 
-            let files = [];
-            let marker = '';
-            let page = 0;
+            let files = [], marker = '';
             while (true) {
-                page++;
-                if (page > 1) log(`Listing ${type}s (page ${page})...`);
-
                 const url = `${PROXY}/?prefix=release/${RELEASE}/theme=${theme}/type=${type}/&max-keys=1000${marker ? '&marker=' + marker : ''}`;
-                const resp = await fetch(url);
-                const xml = new DOMParser().parseFromString(await resp.text(), 'text/xml');
+                const xml = new DOMParser().parseFromString(await (await fetch(url)).text(), 'text/xml');
                 const keys = [...xml.querySelectorAll('Key')].map(k => k.textContent);
                 files.push(...keys.map(k => `${PROXY}/${k}`));
-
-                const isTruncated = xml.querySelector('IsTruncated')?.textContent === 'true';
-                if (!isTruncated || keys.length === 0) break;
+                if (xml.querySelector('IsTruncated')?.textContent !== 'true') break;
                 marker = encodeURIComponent(keys[keys.length - 1]);
             }
-            log(`Found ${files.length} ${type} files`);
             fileCache[key] = files;
+            localStorage.setItem(CACHE_KEY, JSON.stringify(fileCache));
             return files;
+        }
+
+        function filterPlaces() {
+            const checked = new Set([...$('categories').querySelectorAll('input[data-cat]:checked')].map(cb => cb.dataset.cat));
+            let visiblePlaces = 0;
+            for (const { marker, cat } of placeMarkers) {
+                if (checked.has(cat)) {
+                    if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
+                    visiblePlaces++;
+                } else {
+                    placesLayer.removeLayer(marker);
+                }
+            }
+            // Also filter buildings - show if any of its associated categories are checked
+            let visibleBuildings = 0;
+            for (const { layer, cats } of buildingMarkers) {
+                const hasVisibleCat = [...cats].some(c => checked.has(c));
+                if (hasVisibleCat) {
+                    if (!buildingsLayer.hasLayer(layer)) buildingsLayer.addLayer(layer);
+                    visibleBuildings++;
+                } else {
+                    buildingsLayer.removeLayer(layer);
+                }
+            }
+            log(`${visiblePlaces.toLocaleString()} places, ${visibleBuildings} buildings`, 'success');
+        }
+
+        function buildCategoryUI(catCounts) {
+            const container = $('categories');
+            container.innerHTML = '';
+
+            const btns = document.createElement('div');
+            btns.className = 'cat-buttons';
+            btns.innerHTML = `<button type="button">All</button><button type="button">None</button>`;
+            btns.children[0].onclick = () => { container.querySelectorAll('input').forEach(c => c.checked = true); filterPlaces(); };
+            btns.children[1].onclick = () => { container.querySelectorAll('input').forEach(c => c.checked = false); filterPlaces(); };
+            container.appendChild(btns);
+
+            for (const [cat, cnt] of catCounts) {
+                const label = document.createElement('label');
+                const input = document.createElement('input');
+                input.type = 'checkbox';
+                input.checked = true;
+                input.dataset.cat = cat;
+                input.onchange = filterPlaces;
+                label.appendChild(input);
+                label.append(` ${cat || 'uncategorized'} `);
+                const span = document.createElement('span');
+                span.className = 'cat-count';
+                span.textContent = `(${cnt})`;
+                label.appendChild(span);
+                container.appendChild(label);
+            }
+
+            $('catCount').textContent = `(${catCounts.length})`;
+            $('catSection').style.display = 'block';
+            container.classList.add('visible');
+        }
+
+        async function loadData() {
+            const bbox = getBbox();
+            const limit = parseInt($('limitSlider').value);
+
+            placesLayer.clearLayers();
+            buildingsLayer.clearLayers();
+            placeMarkers = [];
+            $('loadBtn').disabled = true;
+
+            try {
+                // Load places
+                log('Loading places...');
+                const placeFiles = await listFiles('places', 'place');
+                const placeFileList = placeFiles.map(f => `'${f}'`).join(',');
+
+                const q = `SELECT names.primary as name, categories.primary as cat,
+                    ST_X(geometry) as lon, ST_Y(geometry) as lat
+                    FROM read_parquet([${placeFileList}], hive_partitioning=false)
+                    WHERE ${bboxWhere(bbox)}
+                    LIMIT ${limit}`;
+
+                const rows = (await conn.query(q)).toArray();
+                log(`Rendering ${rows.length} places...`);
+
+                const catCounts = {};
+                for (const r of rows) {
+                    const cat = r.cat || '';
+                    catCounts[cat] = (catCounts[cat] || 0) + 1;
+                    if (r.lat && r.lon) {
+                        const marker = L.circleMarker([Number(r.lat), Number(r.lon)], {
+                            radius: 5, fillColor: '#e74c3c', color: '#c0392b', weight: 1, fillOpacity: 0.8
+                        }).bindPopup(`<b>${r.name || '?'}</b><br>${cat}`);
+                        marker.addTo(placesLayer);
+                        placeMarkers.push({ marker, cat });
+                    }
+                }
+
+                const sortedCats = Object.entries(catCounts).sort((a, b) => b[1] - a[1]);
+                buildCategoryUI(sortedCats);
+
+                // Load buildings where bbox overlaps with place bbox + distance buffer
+                buildingMarkers = [];
+                if ($('buildingsCheck').checked) {
+                    log('Loading buildings...');
+                    const buildingFiles = await listFiles('buildings', 'building');
+                    const buildingFileList = buildingFiles.map(f => `'${f}'`).join(',');
+
+                    const distMeters = parseInt($('distanceSlider').value);
+                    const d = distMeters / 111000; // ~111km per degree
+
+                    // Create temp table with place bboxes + category
+                    await conn.query(`DROP TABLE IF EXISTS temp_places`);
+                    await conn.query(`CREATE TEMP TABLE temp_places AS
+                        SELECT categories.primary as cat,
+                               bbox.xmin as xmin, bbox.xmax as xmax, bbox.ymin as ymin, bbox.ymax as ymax
+                        FROM read_parquet([${placeFileList}], hive_partitioning=false)
+                        WHERE ${bboxWhere(bbox)}
+                        LIMIT ${limit}`);
+
+                    // Buildings with their overlapping place categories
+                    const bq = `SELECT ST_AsGeoJSON(b.geometry) as geojson,
+                               LIST(DISTINCT COALESCE(p.cat, '')) as cats
+                        FROM read_parquet([${buildingFileList}], hive_partitioning=false) b
+                        JOIN temp_places p ON
+                             b.bbox.xmax >= p.xmin - ${d} AND b.bbox.xmin <= p.xmax + ${d}
+                             AND b.bbox.ymax >= p.ymin - ${d} AND b.bbox.ymin <= p.ymax + ${d}
+                        WHERE ${bboxWhere(bbox, 'b')}
+                        GROUP BY b.geometry`;
+
+                    const buildings = (await conn.query(bq)).toArray();
+                    log(`Rendering ${buildings.length} buildings...`);
+
+                    for (const r of buildings) {
+                        if (r.geojson) {
+                            const layer = L.geoJSON(JSON.parse(r.geojson), {
+                                style: { fillColor: '#3388ff', color: '#2266cc', weight: 1, fillOpacity: 0.5 }
+                            });
+                            layer.addTo(buildingsLayer);
+                            const cats = new Set(r.cats || []);
+                            buildingMarkers.push({ layer, cats });
+                        }
+                    }
+                }
+
+                log(`${placeMarkers.length} places, ${buildingMarkers.length} buildings`, 'success');
+            } catch (e) {
+                log(`Error: ${e.message}`, 'error');
+                console.error(e);
+            } finally {
+                $('loadBtn').disabled = false;
+            }
         }
 
         async function init() {
@@ -163,144 +334,24 @@
                 const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
                 await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
                 conn = await db.connect();
-
-                log('Loading spatial extension...');
                 await conn.query('INSTALL spatial; LOAD spatial;');
 
-                log('Ready - click Load', 'success');
-                loadBtn.disabled = false;
+                log('Ready', 'success');
+                $('loadBtn').disabled = false;
+
+                // Preload file lists in background
+                if (!fileCache['places/place']) {
+                    log('Caching file lists...');
+                    await listFiles('places', 'place');
+                    await listFiles('buildings', 'building');
+                    log('Ready', 'success');
+                }
             } catch (e) {
                 log(`Init error: ${e.message}`, 'error');
             }
         }
 
-        async function loadData() {
-            const b = map.getBounds();
-            const bbox = { xmin: b.getWest(), xmax: b.getEast(), ymin: b.getSouth(), ymax: b.getNorth() };
-            const limit = parseInt(limitSlider.value);
-
-            layers.clearLayers();
-            loadBtn.disabled = true;
-
-            let totalPlaces = 0, totalBuildings = 0;
-
-            try {
-                if (placesCheck.checked) {
-                    log('Places: listing files...');
-                    const files = await listFiles('places', 'place');
-                    log(`Places: scanning ${files.length} files (using metadata)...`);
-                    const fileList = files.map(f => `'${f}'`).join(',');
-
-                    // hive_partitioning and file_row_number help DuckDB use parquet stats
-                    const q = `SELECT names.primary as name, categories.primary as cat,
-                        ST_X(geometry) as lon, ST_Y(geometry) as lat
-                        FROM read_parquet([${fileList}], hive_partitioning=false)
-                        WHERE bbox.xmin >= ${bbox.xmin} AND bbox.xmax <= ${bbox.xmax}
-                        AND bbox.ymin >= ${bbox.ymin} AND bbox.ymax <= ${bbox.ymax}
-                        LIMIT ${limit}`;
-
-                    const rows = (await conn.query(q)).toArray();
-                    log(`Places: rendering ${rows.length.toLocaleString()} markers...`);
-
-                    for (let i = 0; i < rows.length; i++) {
-                        const r = rows[i];
-                        if (r.lat && r.lon) {
-                            L.circleMarker([Number(r.lat), Number(r.lon)], {
-                                radius: 5, fillColor: '#e74c3c', color: '#c0392b', weight: 1, fillOpacity: 0.8
-                            }).bindPopup(`<b>${r.name || '?'}</b><br>${r.cat || ''}`).addTo(layers);
-                            totalPlaces++;
-                        }
-                        if (i % 5000 === 0 && i > 0) {
-                            log(`Places: rendered ${i.toLocaleString()} / ${rows.length.toLocaleString()}...`);
-                            await new Promise(r => setTimeout(r, 0)); // yield to UI
-                        }
-                    }
-                }
-
-                if (buildingsCheck.checked) {
-                    log('Buildings: listing files...');
-                    const files = await listFiles('buildings', 'building');
-
-                    // Get or build bbox cache for files
-                    let relevantFiles = files;
-                    const cacheKey = 'buildings/building';
-
-                    if (!bboxCache[cacheKey]) {
-                        log(`Buildings: reading metadata (first time, will cache)...`);
-                        bboxCache[cacheKey] = {};
-
-                        // Read min/max bbox from each file (can parallelize later)
-                        for (let i = 0; i < files.length; i++) {
-                            if (i % 20 === 0) log(`Buildings: caching metadata ${i}/${files.length}...`);
-                            try {
-                                const metaQ = `SELECT
-                                    MIN(bbox.xmin) as xmin, MAX(bbox.xmax) as xmax,
-                                    MIN(bbox.ymin) as ymin, MAX(bbox.ymax) as ymax
-                                    FROM read_parquet('${files[i]}')`;
-                                const meta = (await conn.query(metaQ)).toArray()[0];
-                                bboxCache[cacheKey][files[i]] = {
-                                    xmin: Number(meta.xmin), xmax: Number(meta.xmax),
-                                    ymin: Number(meta.ymin), ymax: Number(meta.ymax)
-                                };
-                            } catch (e) {
-                                console.warn(`Failed to read metadata for ${files[i]}:`, e);
-                            }
-                        }
-                        console.log('Cached bbox metadata for', Object.keys(bboxCache[cacheKey]).length, 'files');
-                    }
-
-                    // Filter files by bbox overlap
-                    relevantFiles = files.filter(f => {
-                        const fb = bboxCache[cacheKey][f];
-                        if (!fb) return true; // include if no metadata
-                        // Check if file bbox overlaps with query bbox
-                        return !(fb.xmax < bbox.xmin || fb.xmin > bbox.xmax ||
-                                 fb.ymax < bbox.ymin || fb.ymin > bbox.ymax);
-                    });
-
-                    log(`Buildings: ${relevantFiles.length}/${files.length} files match bbox`);
-
-                    if (relevantFiles.length === 0) {
-                        log(`No building files cover this area`, 'error');
-                    } else {
-                        const fileList = relevantFiles.map(f => `'${f}'`).join(',');
-                        const q = `SELECT height, class, ST_AsGeoJSON(geometry) as geojson
-                            FROM read_parquet([${fileList}], hive_partitioning=false)
-                            WHERE bbox.xmin >= ${bbox.xmin} AND bbox.xmax <= ${bbox.xmax}
-                            AND bbox.ymin >= ${bbox.ymin} AND bbox.ymax <= ${bbox.ymax}
-                            LIMIT ${limit}`;
-
-                        const rows = (await conn.query(q)).toArray();
-                        log(`Buildings: rendering ${rows.length.toLocaleString()} polygons...`);
-
-                        for (let i = 0; i < rows.length; i++) {
-                            const r = rows[i];
-                            try {
-                                if (!r.geojson) continue;
-                                const geo = JSON.parse(r.geojson);
-                                L.geoJSON(geo, {
-                                    style: { fillColor: '#3388ff', color: '#2266cc', weight: 1, fillOpacity: 0.5 }
-                                }).bindPopup(`${r.class || 'building'}<br>${r.height ? r.height + 'm' : ''}`).addTo(layers);
-                                totalBuildings++;
-                            } catch (e) {}
-                            if (i % 2000 === 0 && i > 0) {
-                                log(`Buildings: rendered ${i.toLocaleString()} / ${rows.length.toLocaleString()}...`);
-                                await new Promise(r => setTimeout(r, 0));
-                            }
-                        }
-                    }
-                }
-
-                log(`Loaded: ${totalPlaces.toLocaleString()} places, ${totalBuildings.toLocaleString()} buildings`, 'success');
-            } catch (e) {
-                log(`Error: ${e.message}`, 'error');
-                console.error(e);
-            } finally {
-                loadBtn.disabled = false;
-            }
-        }
-
-        loadBtn.onclick = loadData;
+        $('loadBtn').onclick = loadData;
         init();
     </script>
 </body>
