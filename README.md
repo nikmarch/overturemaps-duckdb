@@ -14,13 +14,22 @@ Browser-based viewer for [Overture Maps](https://overturemaps.org/) data using D
 - File list caching in localStorage for faster subsequent loads
 - URL hash preserves map position
 
-## Usage
+## Development
 
 ```bash
 docker compose up
 ```
 
-Open http://localhost:8787
+- App: http://localhost:5173
+- S3 proxy: http://localhost:8080
+
+## Production Build
+
+```bash
+docker compose run --rm app npm run build
+```
+
+Output in `dist/` - serve with any static file server.
 
 1. Position the map to your area of interest
 2. Adjust the limit slider
