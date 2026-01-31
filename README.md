@@ -20,7 +20,7 @@ Browser-based viewer for [Overture Maps](https://overturemaps.org/) data using D
 docker compose up
 ```
 
-- App: http://localhost:5173
+- App: http://localhost
 - S3 proxy: http://localhost:8080
 
 ## Production Build
