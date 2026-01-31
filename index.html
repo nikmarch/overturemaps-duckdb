@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Overture Maps Browser</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; }
+        #map { height: 100vh; width: 100%; }
+        #status {
+            position: absolute;
+            top: 10px;
+            left: 50px;
+            z-index: 1000;
+            background: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+            font-size: 14px;
+            max-width: 400px;
+        }
+        #status.loading { background: #fff3cd; }
+        #status.error { background: #f8d7da; }
+        #status.success { background: #d4edda; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 16px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-width: 200px;
+        }
+        .slider-container {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .slider-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            color: #555;
+        }
+        .slider-value {
+            font-weight: bold;
+            color: #007bff;
+        }
+        #limitSlider {
+            width: 100%;
+            height: 6px;
+            -webkit-appearance: none;
+            background: linear-gradient(to right, #e0e0e0, #007bff);
+            border-radius: 3px;
+            outline: none;
+        }
+        #limitSlider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            background: #007bff;
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        #limitSlider::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            background: #007bff;
+            border-radius: 50%;
+            cursor: pointer;
+            border: none;
+        }
+        .btn-row {
+            display: flex;
+            gap: 8px;
+        }
+        button {
+            flex: 1;
+            padding: 10px 16px;
+            cursor: pointer;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+        button:hover:not(:disabled) { background: #0056b3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="status">Initializing DuckDB...</div>
+    <div id="controls">
+        <div class="slider-container">
+            <div class="slider-label">
+                <span>Limit</span>
+                <span class="slider-value" id="limitValue">100k</span>
+            </div>
+            <input type="range" id="limitSlider" min="0" max="100" value="45">
+            <div class="slider-label">
+                <span>10k</span>
+                <span>1M</span>
+            </div>
+        </div>
+        <div class="btn-row">
+            <button id="loadBtn" disabled>Load</button>
+            <button id="locateBtn">Locate</button>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script type="module">
+        import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
+
+        const status = document.getElementById('status');
+        const loadBtn = document.getElementById('loadBtn');
+        const locateBtn = document.getElementById('locateBtn');
+        const limitSlider = document.getElementById('limitSlider');
+        const limitValue = document.getElementById('limitValue');
+
+        // Logarithmic scale: 10k to 1M
+        function sliderToLimit(val) {
+            const minLog = Math.log10(10000);
+            const maxLog = Math.log10(1000000);
+            const log = minLog + (val / 100) * (maxLog - minLog);
+            return Math.round(Math.pow(10, log));
+        }
+
+        function formatLimit(n) {
+            if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(0) + 'k';
+            return n.toString();
+        }
+
+        function updateLimitDisplay() {
+            limitValue.textContent = formatLimit(sliderToLimit(limitSlider.value));
+        }
+
+        limitSlider.addEventListener('input', updateLimitDisplay);
+        updateLimitDisplay();
+
+        // Use local nginx proxy to avoid CORS issues
+        const OVERTURE_BASE = `${window.location.origin}/s3`;
+        const RELEASE = '2026-01-21.0';
+
+        let db = null;
+        let conn = null;
+        let markers = L.layerGroup();
+        let parquetFiles = [];
+
+        // Initialize map centered on SF by default
+        const map = L.map('map').setView([37.7749, -122.4194], 14);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors | Data: Overture Maps'
+        }).addTo(map);
+        markers.addTo(map);
+
+        function setStatus(msg, type = '') {
+            status.textContent = msg;
+            status.className = type;
+        }
+
+        async function listParquetFiles() {
+            // List first N parquet files from S3
+            const listUrl = `${OVERTURE_BASE}/?prefix=release/${RELEASE}/theme=places/type=place/&max-keys=20`;
+            const resp = await fetch(listUrl);
+            const text = await resp.text();
+            const parser = new DOMParser();
+            const xml = parser.parseFromString(text, 'text/xml');
+            const keys = xml.querySelectorAll('Key');
+            return Array.from(keys).map(k => `${OVERTURE_BASE}/${k.textContent}`);
+        }
+
+        async function initDuckDB() {
+            try {
+                setStatus('Loading DuckDB WASM...', 'loading');
+
+                const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
+                const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
+
+                const worker_url = URL.createObjectURL(
+                    new Blob([`importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' })
+                );
+
+                const worker = new Worker(worker_url);
+                const logger = new duckdb.ConsoleLogger();
+                db = new duckdb.AsyncDuckDB(logger, worker);
+                await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+                URL.revokeObjectURL(worker_url);
+
+                conn = await db.connect();
+
+                setStatus('Listing Overture parquet files...', 'loading');
+                parquetFiles = await listParquetFiles();
+                console.log(`Found ${parquetFiles.length} parquet files`);
+
+                setStatus(`Ready! Found ${parquetFiles.length} data files. Click "Load Places"`, 'success');
+                loadBtn.disabled = false;
+            } catch (err) {
+                setStatus(`Error: ${err.message}`, 'error');
+                console.error(err);
+            }
+        }
+
+        async function loadPlaces() {
+            if (!conn || parquetFiles.length === 0) return;
+
+            const bounds = map.getBounds();
+            const minLat = bounds.getSouth();
+            const maxLat = bounds.getNorth();
+            const minLon = bounds.getWest();
+            const maxLon = bounds.getEast();
+
+            setStatus(`Querying ${parquetFiles.length} files for places...`, 'loading');
+            loadBtn.disabled = true;
+
+            try {
+                // Build array of file URLs for read_parquet
+                const fileList = parquetFiles.map(f => `'${f}'`).join(', ');
+
+                const limit = sliderToLimit(limitSlider.value);
+                const query = `
+                    SELECT
+                        id,
+                        names.primary as name,
+                        ST_Y(geometry) as lat,
+                        ST_X(geometry) as lon,
+                        categories.primary as category
+                    FROM read_parquet([${fileList}])
+                    WHERE bbox.xmin >= ${minLon}
+                      AND bbox.xmax <= ${maxLon}
+                      AND bbox.ymin >= ${minLat}
+                      AND bbox.ymax <= ${maxLat}
+                    LIMIT ${limit}
+                `;
+
+                console.log('Querying...');
+                const result = await conn.query(query);
+                const rows = result.toArray();
+
+                markers.clearLayers();
+
+                for (const row of rows) {
+                    const lat = Number(row.lat);
+                    const lon = Number(row.lon);
+                    const name = row.name || 'Unknown';
+                    const category = row.category || '';
+
+                    if (lat && lon && !isNaN(lat) && !isNaN(lon)) {
+                        const marker = L.circleMarker([lat, lon], {
+                            radius: 6,
+                            fillColor: '#e74c3c',
+                            color: '#c0392b',
+                            weight: 1,
+                            fillOpacity: 0.8
+                        });
+                        marker.bindPopup(`<b>${name}</b><br>${category}`);
+                        markers.addLayer(marker);
+                    }
+                }
+
+                setStatus(`Loaded ${rows.length} places`, 'success');
+            } catch (err) {
+                setStatus(`Query error: ${err.message}`, 'error');
+                console.error(err);
+            } finally {
+                loadBtn.disabled = false;
+            }
+        }
+
+        function locateUser() {
+            if (!navigator.geolocation) {
+                setStatus('Geolocation not supported', 'error');
+                return;
+            }
+
+            setStatus('Getting location...', 'loading');
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    const { latitude, longitude } = pos.coords;
+                    map.setView([latitude, longitude], 15);
+                    setStatus('Location found!', 'success');
+                },
+                (err) => {
+                    setStatus(`Location error: ${err.message}`, 'error');
+                }
+            );
+        }
+
+        loadBtn.addEventListener('click', loadPlaces);
+        locateBtn.addEventListener('click', locateUser);
+
+        // Initialize
+        initDuckDB();
+    </script>
+</body>
+</html>
