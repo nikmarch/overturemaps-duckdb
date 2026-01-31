@@ -165,11 +165,25 @@ async function loadData() {
       log('Loading buildings...');
       const buildingFiles = await listFiles('buildings', 'building');
       const buildingFileList = buildingFiles.map(f => `'${f}'`).join(',');
+      const d = parseInt($('distanceSlider').value) / 111000; // degrees from meters
 
+      // Temp table with place bboxes for spatial join
+      await conn.query(`DROP TABLE IF EXISTS temp_places`);
+      await conn.query(`
+        CREATE TEMP TABLE temp_places AS
+        SELECT categories.primary as cat, bbox.xmin, bbox.xmax, bbox.ymin, bbox.ymax
+        FROM read_parquet([${placeFileList}], hive_partitioning=false)
+        WHERE ${bboxWhere(bbox)}
+        LIMIT ${limit}`);
+
+      // Join buildings to places by bbox overlap with distance buffer
       const buildingsQuery = `
-        SELECT ST_AsGeoJSON(geometry) as geojson
-        FROM read_parquet([${buildingFileList}], hive_partitioning=false)
-        WHERE ${bboxWhere(bbox)}`;
+        SELECT ST_AsGeoJSON(b.geometry) as geojson, LIST(DISTINCT COALESCE(p.cat, '')) as cats
+        FROM read_parquet([${buildingFileList}], hive_partitioning=false) b
+        JOIN temp_places p ON b.bbox.xmax >= p.xmin - ${d} AND b.bbox.xmin <= p.xmax + ${d}
+                          AND b.bbox.ymax >= p.ymin - ${d} AND b.bbox.ymin <= p.ymax + ${d}
+        WHERE ${bboxWhere(bbox, 'b')}
+        GROUP BY b.geometry`;
 
       const buildings = (await conn.query(buildingsQuery)).toArray();
       log(`Rendering ${buildings.length} buildings...`);
@@ -180,7 +194,7 @@ async function loadData() {
             style: { fillColor: '#3388ff', color: '#2266cc', weight: 1, fillOpacity: 0.5 }
           });
           layer.addTo(buildingsLayer);
-          buildingMarkers.push({ layer, cats: new Set() });
+          buildingMarkers.push({ layer, cats: new Set(r.cats || []) });
         }
       }
     }
