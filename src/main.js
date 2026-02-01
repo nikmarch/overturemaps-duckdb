@@ -195,10 +195,57 @@ async function loadPlaces() {
   }
 }
 
+async function loadBuildingsAllFiles(bbox, files) {
+  const fileList = files.map(f => `'${f}'`).join(',');
+  const start = performance.now();
+  await conn.query(`
+    CREATE TABLE buildings AS
+    SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
+    FROM read_parquet([${fileList}], hive_partitioning=false) b
+    WHERE ${bboxFilter(bbox, 'b')}`);
+  console.log(`All files mode: ${((performance.now() - start) / 1000).toFixed(1)}s`);
+}
+
+async function loadBuildingsGlob(bbox) {
+  const globUrl = `${PROXY}/release/${RELEASE}/theme=buildings/type=building/*.parquet`;
+  const start = performance.now();
+  await conn.query(`
+    CREATE TABLE buildings AS
+    SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
+    FROM read_parquet('${globUrl}', hive_partitioning=false) b
+    WHERE ${bboxFilter(bbox, 'b')}`);
+  console.log(`Glob mode: ${((performance.now() - start) / 1000).toFixed(1)}s`);
+}
+
+async function loadBuildingsChunked(bbox, files) {
+  const chunkSize = 10;
+  const start = performance.now();
+
+  await conn.query(`
+    CREATE TABLE buildings (
+      id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY,
+      bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE)
+    )`);
+
+  for (let i = 0; i < files.length; i += chunkSize) {
+    const chunk = files.slice(i, i + chunkSize);
+    const fileList = chunk.map(f => `'${f}'`).join(',');
+    log(`Loading chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(files.length / chunkSize)}...`);
+
+    await conn.query(`
+      INSERT INTO buildings
+      SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
+      FROM read_parquet([${fileList}], hive_partitioning=false) b
+      WHERE ${bboxFilter(bbox, 'b')}`);
+  }
+  console.log(`Chunked mode: ${((performance.now() - start) / 1000).toFixed(1)}s`);
+}
+
 async function loadBuildings() {
   const bbox = getBbox();
   const d = parseInt($('distanceSlider').value) / 111000;
   const useCache = bboxContains(buildingsBbox, bbox);
+  const mode = $('loadMode').value;
 
   buildingsLayer.clearLayers();
   buildingMarkers = [];
@@ -212,14 +259,18 @@ async function loadBuildings() {
     }
 
     if (!useCache) {
-      log('Loading buildings from Overture...');
-      const files = (await listFiles('buildings', 'building')).map(f => `'${f}'`).join(',');
+      log(`Loading buildings (${mode} mode)...`);
+      const files = await listFiles('buildings', 'building');
       await conn.query(`DROP TABLE IF EXISTS buildings`);
-      await conn.query(`
-        CREATE TABLE buildings AS
-        SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
-        FROM read_parquet([${files}], hive_partitioning=false) b
-        WHERE ${bboxFilter(bbox, 'b')}`);
+
+      if (mode === 'glob') {
+        await loadBuildingsGlob(bbox);
+      } else if (mode === 'chunked') {
+        await loadBuildingsChunked(bbox, files);
+      } else {
+        await loadBuildingsAllFiles(bbox, files);
+      }
+
       buildingsBbox = { ...bbox };
     } else {
       log('Querying cached buildings...');

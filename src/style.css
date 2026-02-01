@@ -81,6 +81,17 @@ input[type="range"]::-webkit-slider-thumb {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
 }
 
+select {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 14px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+}
+select:focus { outline: none; border-color: #007bff; }
+
 .btn-row { display: flex; gap: 8px; }
 .btn-row button { flex: 1; }
 
