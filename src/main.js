@@ -113,41 +113,50 @@ let indexBuilding = false;
 async function buildFileIndex(files) {
   if (indexBuilding) return;
   indexBuilding = true;
-  const unindexed = files.filter(f => !fileIndex[f]);
-  if (unindexed.length === 0) return;
 
-  log(`Building index (${unindexed.length} files)...`);
-  const batchSize = 10;
+  try {
+    const unindexed = files.filter(f => !fileIndex[f]);
+    if (unindexed.length === 0) return;
 
-  for (let i = 0; i < unindexed.length; i += batchSize) {
-    const batch = unindexed.slice(i, i + batchSize);
-    const fileList = batch.map(f => `'${f}'`).join(',');
+    log(`Building index (${unindexed.length} files)...`);
+    const batchSize = 5;
 
-    try {
-      const result = await conn.query(`
-        SELECT file_name,
-               MIN(stats_min_value) FILTER (WHERE path_in_schema = 'bbox.xmin') as xmin,
-               MAX(stats_max_value) FILTER (WHERE path_in_schema = 'bbox.xmax') as xmax,
-               MIN(stats_min_value) FILTER (WHERE path_in_schema = 'bbox.ymin') as ymin,
-               MAX(stats_max_value) FILTER (WHERE path_in_schema = 'bbox.ymax') as ymax
-        FROM parquet_metadata([${fileList}])
-        GROUP BY file_name
-      `);
+    for (let i = 0; i < unindexed.length; i += batchSize) {
+      const batch = unindexed.slice(i, i + batchSize);
+      const fileList = batch.map(f => `'${f}'`).join(',');
 
-      for (const row of result.toArray()) {
-        fileIndex[row.file_name] = {
-          xmin: row.xmin, xmax: row.xmax, ymin: row.ymin, ymax: row.ymax
-        };
+      try {
+        // Query parquet metadata for bbox column statistics
+        const result = await conn.query(`
+          SELECT file_name,
+                 MIN(CAST(stats_min AS DOUBLE)) FILTER (WHERE path_in_schema LIKE '%bbox%xmin%') as xmin,
+                 MAX(CAST(stats_max AS DOUBLE)) FILTER (WHERE path_in_schema LIKE '%bbox%xmax%') as xmax,
+                 MIN(CAST(stats_min AS DOUBLE)) FILTER (WHERE path_in_schema LIKE '%bbox%ymin%') as ymin,
+                 MAX(CAST(stats_max AS DOUBLE)) FILTER (WHERE path_in_schema LIKE '%bbox%ymax%') as ymax
+          FROM parquet_metadata([${fileList}])
+          GROUP BY file_name
+        `);
+
+        for (const row of result.toArray()) {
+          if (row.xmin != null && row.xmax != null && row.ymin != null && row.ymax != null) {
+            fileIndex[row.file_name] = {
+              xmin: Number(row.xmin), xmax: Number(row.xmax),
+              ymin: Number(row.ymin), ymax: Number(row.ymax)
+            };
+          } else {
+            fileIndex[row.file_name] = { xmin: -180, xmax: 180, ymin: -90, ymax: 90 };
+          }
+        }
+      } catch (e) {
+        console.error('Index batch error:', e.message);
+        batch.forEach(f => fileIndex[f] = { xmin: -180, xmax: 180, ymin: -90, ymax: 90 });
       }
-    } catch (e) {
-      console.error('Index batch error:', e.message);
-      batch.forEach(f => fileIndex[f] = { xmin: -180, xmax: 180, ymin: -90, ymax: 90 });
+
+      log(`Building index (${Math.min(i + batchSize, unindexed.length)}/${unindexed.length})...`);
     }
-
-    log(`Building index (${Math.min(i + batchSize, unindexed.length)}/${unindexed.length})...`);
+  } finally {
+    indexBuilding = false;
   }
-
-  indexBuilding = false;
 }
 
 function filterFilesByBbox(files, bbox) {
@@ -284,13 +293,14 @@ async function loadBuildingsFiltered(bbox, allFiles) {
 
   // Filter files by bbox using local index
   const files = filterFilesByBbox(allFiles, bbox);
+  log(`Loading buildings (${files.length}/${allFiles.length} files)...`);
 
   if (files.length === 0) {
-    log('No building files match viewport', 'success');
+    // Create empty table
+    await conn.query(`CREATE TABLE buildings (id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
     return;
   }
 
-  log(`Loading buildings (${files.length}/${allFiles.length} files)...`);
   const fileList = files.map(f => `'${f}'`).join(',');
   await conn.query(`
     CREATE TABLE buildings AS
