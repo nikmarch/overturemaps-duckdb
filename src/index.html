@@ -10,10 +10,14 @@
 <body>
   <div id="map"></div>
   <div id="controls">
-    <div id="status" class="loading">
-      <div class="spinner"></div>
-      <span>Initializing...</span>
+    <div id="controlsHeader">
+      <div id="status" class="loading">
+        <div class="spinner"></div>
+        <span>Initializing...</span>
+      </div>
+      <button id="collapseBtn" title="Toggle controls">−</button>
     </div>
+    <div id="controlsBody">
     <div class="slider-row">
       <div class="slider-header">
         <span>Building distance</span>
@@ -48,6 +52,7 @@
         <span id="catToggle">▼</span>
       </div>
       <div id="categories"></div>
+    </div>
     </div>
   </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

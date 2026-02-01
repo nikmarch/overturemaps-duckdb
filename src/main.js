@@ -41,6 +41,12 @@ $('catHeader').onclick = () => $('categories').classList.toggle('visible');
 $('loadPlacesBtn').onclick = loadPlaces;
 $('loadBuildingsBtn').onclick = loadBuildings;
 $('intersectCheck').onchange = findIntersections;
+$('collapseBtn').onclick = () => {
+  const body = $('controlsBody');
+  const btn = $('collapseBtn');
+  body.classList.toggle('collapsed');
+  btn.textContent = body.classList.contains('collapsed') ? '+' : '−';
+};
 
 map.on('moveend', () => {
   const c = map.getCenter();
@@ -48,7 +54,11 @@ map.on('moveend', () => {
 });
 
 function log(msg, type = 'loading') {
-  $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>`;
+  const totals = [];
+  if (placeMarkers.length) totals.push(`${placeMarkers.length.toLocaleString()} places`);
+  if (buildingMarkers.length) totals.push(`${buildingMarkers.length.toLocaleString()} buildings`);
+  const totalsHtml = totals.length ? `<span class="status-totals">${totals.join(' | ')}</span>` : '';
+  $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>${totalsHtml}`;
   $('status').className = type;
 }
 
