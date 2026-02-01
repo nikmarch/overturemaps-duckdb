@@ -28,5 +28,8 @@ jobs:
       - name: Set worker URL
         run: sed -i "s/YOUR_SUBDOMAIN/${{ env.CLOUDFLARE_SUBDOMAIN }}/" src/main.js
 
+      - name: Create Pages project if needed
+        run: npx wrangler pages project create overture-maps --production-branch=master 2>/dev/null || true
+
       - name: Deploy Pages
-        run: npx wrangler pages deploy src --project-name=overture-maps
+        run: npx wrangler pages deploy src --project-name=overture-maps --commit-dirty=true
