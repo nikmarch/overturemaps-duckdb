@@ -226,35 +226,11 @@ async function loadBuildingsProxyFiltered(bbox) {
   console.log(`Proxy-filtered mode: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length}/${236} files`);
 }
 
-async function loadBuildingsChunked(bbox, files) {
-  const chunkSize = 10;
-  const start = performance.now();
-
-  await conn.query(`
-    CREATE TABLE buildings (
-      id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY,
-      bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE)
-    )`);
-
-  for (let i = 0; i < files.length; i += chunkSize) {
-    const chunk = files.slice(i, i + chunkSize);
-    const fileList = chunk.map(f => `'${f}'`).join(',');
-    log(`Loading chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(files.length / chunkSize)}...`);
-
-    await conn.query(`
-      INSERT INTO buildings
-      SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
-      FROM read_parquet([${fileList}], hive_partitioning=false) b
-      WHERE ${bboxFilter(bbox, 'b')}`);
-  }
-  console.log(`Chunked mode: ${((performance.now() - start) / 1000).toFixed(1)}s`);
-}
-
 async function loadBuildings() {
   const bbox = getBbox();
   const d = parseInt($('distanceSlider').value) / 111000;
   const useCache = bboxContains(buildingsBbox, bbox);
-  const mode = $('loadMode').value;
+  const mode = document.querySelector('input[name="loadMode"]:checked').value;
 
   buildingsLayer.clearLayers();
   buildingMarkers = [];
@@ -272,9 +248,7 @@ async function loadBuildings() {
       const files = await listFiles('buildings', 'building');
       await conn.query(`DROP TABLE IF EXISTS buildings`);
 
-      if (mode === 'chunked') {
-        await loadBuildingsChunked(bbox, files);
-      } else if (mode === 'proxy') {
+      if (mode === 'proxy') {
         await loadBuildingsProxyFiltered(bbox);
       } else {
         await loadBuildingsAllFiles(bbox, files);

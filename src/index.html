@@ -28,13 +28,9 @@
       </div>
       <input type="range" id="limitSlider" min="33000" max="1000000" value="33000" step="1000">
     </div>
-    <div class="slider-row">
-      <div class="slider-header"><span>Load mode</span></div>
-      <select id="loadMode">
-        <option value="all">All files at once</option>
-        <option value="chunked">Chunked (10 files)</option>
-        <option value="proxy">Proxy-filtered by bbox</option>
-      </select>
+    <div class="radio-row">
+      <label><input type="radio" name="loadMode" value="frontend" checked> Frontend (all files)</label>
+      <label><input type="radio" name="loadMode" value="proxy"> Proxy (filtered)</label>
     </div>
     <div class="btn-row">
       <button id="loadPlacesBtn" disabled>Load Places</button>
