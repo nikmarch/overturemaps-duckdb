@@ -106,6 +106,59 @@ async function listFiles(theme, type) {
   return files;
 }
 
+// Build spatial index from parquet file metadata using DuckDB
+const fileIndex = {}; // file -> {xmin, xmax, ymin, ymax}
+let indexBuilding = false;
+
+async function buildFileIndex(files) {
+  if (indexBuilding) return;
+  indexBuilding = true;
+  const unindexed = files.filter(f => !fileIndex[f]);
+  if (unindexed.length === 0) return;
+
+  log(`Building index (${unindexed.length} files)...`);
+  const batchSize = 10;
+
+  for (let i = 0; i < unindexed.length; i += batchSize) {
+    const batch = unindexed.slice(i, i + batchSize);
+    const fileList = batch.map(f => `'${f}'`).join(',');
+
+    try {
+      const result = await conn.query(`
+        SELECT file_name,
+               MIN(stats_min_value) FILTER (WHERE path_in_schema = 'bbox.xmin') as xmin,
+               MAX(stats_max_value) FILTER (WHERE path_in_schema = 'bbox.xmax') as xmax,
+               MIN(stats_min_value) FILTER (WHERE path_in_schema = 'bbox.ymin') as ymin,
+               MAX(stats_max_value) FILTER (WHERE path_in_schema = 'bbox.ymax') as ymax
+        FROM parquet_metadata([${fileList}])
+        GROUP BY file_name
+      `);
+
+      for (const row of result.toArray()) {
+        fileIndex[row.file_name] = {
+          xmin: row.xmin, xmax: row.xmax, ymin: row.ymin, ymax: row.ymax
+        };
+      }
+    } catch (e) {
+      console.error('Index batch error:', e.message);
+      batch.forEach(f => fileIndex[f] = { xmin: -180, xmax: 180, ymin: -90, ymax: 90 });
+    }
+
+    log(`Building index (${Math.min(i + batchSize, unindexed.length)}/${unindexed.length})...`);
+  }
+
+  indexBuilding = false;
+}
+
+function filterFilesByBbox(files, bbox) {
+  return files.filter(f => {
+    const fb = fileIndex[f];
+    if (!fb) return true; // include if not indexed
+    return fb.xmax >= bbox.xmin && fb.xmin <= bbox.xmax &&
+           fb.ymax >= bbox.ymin && fb.ymin <= bbox.ymax;
+  });
+}
+
 function renderBuilding(geojson, id) {
   const layer = L.geoJSON(JSON.parse(geojson), {
     style: { fillColor: '#3388ff', color: '#2266cc', weight: 1, fillOpacity: 0.5 }
@@ -220,28 +273,31 @@ async function loadBuildingsAllFiles(bbox, files) {
     SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
     FROM read_parquet([${fileList}], hive_partitioning=false) b
     WHERE ${bboxFilter(bbox, 'b')}`);
-  console.log(`All files mode: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
+  console.log(`All files: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
 }
 
-async function loadBuildingsProxyFiltered(bbox, totalFiles) {
+async function loadBuildingsFiltered(bbox, allFiles) {
   const start = performance.now();
-  const url = `${PROXY}/files/buildings?xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
-  const response = await fetch(url);
-  const files = await response.json();
+
+  // Build index if needed
+  await buildFileIndex(allFiles);
+
+  // Filter files by bbox using local index
+  const files = filterFilesByBbox(allFiles, bbox);
 
   if (files.length === 0) {
     log('No building files match viewport', 'success');
     return;
   }
 
-  log(`Loading buildings (${files.length}/${totalFiles} files)...`);
+  log(`Loading buildings (${files.length}/${allFiles.length} files)...`);
   const fileList = files.map(f => `'${f}'`).join(',');
   await conn.query(`
     CREATE TABLE buildings AS
     SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
     FROM read_parquet([${fileList}], hive_partitioning=false) b
     WHERE ${bboxFilter(bbox, 'b')}`);
-  console.log(`Proxy-filtered: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length}/${totalFiles} files`);
+  console.log(`Filtered: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length}/${allFiles.length} files`);
 }
 
 async function loadBuildings() {
@@ -267,7 +323,7 @@ async function loadBuildings() {
       await conn.query(`DROP TABLE IF EXISTS buildings`);
 
       if (mode === 'proxy') {
-        await loadBuildingsProxyFiltered(bbox, files.length);
+        await loadBuildingsFiltered(bbox, files);
       } else {
         await loadBuildingsAllFiles(bbox, files);
       }
