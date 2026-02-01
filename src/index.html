@@ -14,13 +14,12 @@
       <div class="spinner"></div>
       <span>Initializing...</span>
     </div>
-    <label><input type="checkbox" id="buildingsCheck"> Load buildings near places</label>
     <div class="slider-row">
       <div class="slider-header">
         <span>Building distance</span>
         <span class="slider-value" id="distanceValue">0m</span>
       </div>
-      <input type="range" id="distanceSlider" min="0" max="50" value="0" step="5">
+      <input type="range" id="distanceSlider" min="0" max="100" value="0" step="5">
     </div>
     <div class="slider-row">
       <div class="slider-header">
@@ -29,7 +28,10 @@
       </div>
       <input type="range" id="limitSlider" min="33000" max="1000000" value="33000" step="1000">
     </div>
-    <button id="loadBtn" disabled>Load Data</button>
+    <div class="btn-row">
+      <button id="loadPlacesBtn" disabled>Load Places</button>
+      <button id="loadBuildingsBtn" disabled>Load Buildings</button>
+    </div>
     <div id="catSection" style="display:none">
       <div id="catHeader">
         <span>Categories <span id="catCount"></span></span>
