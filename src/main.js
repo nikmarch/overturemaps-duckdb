@@ -203,7 +203,27 @@ async function loadBuildingsAllFiles(bbox, files) {
     SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
     FROM read_parquet([${fileList}], hive_partitioning=false) b
     WHERE ${bboxFilter(bbox, 'b')}`);
-  console.log(`All files mode: ${((performance.now() - start) / 1000).toFixed(1)}s`);
+  console.log(`All files mode: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
+}
+
+async function loadBuildingsProxyFiltered(bbox) {
+  const start = performance.now();
+  const url = `${PROXY}/files/buildings?xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
+  const response = await fetch(url);
+  const files = await response.json();
+
+  if (files.length === 0) {
+    console.log('Proxy-filtered: no files match bbox');
+    return;
+  }
+
+  const fileList = files.map(f => `'${f}'`).join(',');
+  await conn.query(`
+    CREATE TABLE buildings AS
+    SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
+    FROM read_parquet([${fileList}], hive_partitioning=false) b
+    WHERE ${bboxFilter(bbox, 'b')}`);
+  console.log(`Proxy-filtered mode: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length}/${236} files`);
 }
 
 async function loadBuildingsChunked(bbox, files) {
@@ -254,6 +274,8 @@ async function loadBuildings() {
 
       if (mode === 'chunked') {
         await loadBuildingsChunked(bbox, files);
+      } else if (mode === 'proxy') {
+        await loadBuildingsProxyFiltered(bbox);
       } else {
         await loadBuildingsAllFiles(bbox, files);
       }
