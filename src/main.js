@@ -60,6 +60,12 @@ function log(msg, type = 'loading') {
   const totalsHtml = totals.length ? `<span class="status-totals">${totals.join(' | ')}</span>` : '';
   $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>${totalsHtml}`;
   $('status').className = type;
+
+  // Auto-expand controls when loading
+  if (type === 'loading') {
+    $('controlsBody').classList.remove('collapsed');
+    $('collapseBtn').textContent = '−';
+  }
 }
 
 function getBbox() {
