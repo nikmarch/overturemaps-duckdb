@@ -171,8 +171,9 @@ async function loadPlaces() {
 
   try {
     if (!useCache) {
-      log('Loading places from Overture...');
-      const files = (await listFiles('places', 'place')).map(f => `'${f}'`).join(',');
+      const fileList = await listFiles('places', 'place');
+      log(`Loading places (${fileList.length} files)...`);
+      const files = fileList.map(f => `'${f}'`).join(',');
       await conn.query(`DROP TABLE IF EXISTS places`);
       await conn.query(`
         CREATE TABLE places AS
@@ -222,24 +223,25 @@ async function loadBuildingsAllFiles(bbox, files) {
   console.log(`All files mode: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
 }
 
-async function loadBuildingsProxyFiltered(bbox) {
+async function loadBuildingsProxyFiltered(bbox, totalFiles) {
   const start = performance.now();
   const url = `${PROXY}/files/buildings?xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
   const response = await fetch(url);
   const files = await response.json();
 
   if (files.length === 0) {
-    console.log('Proxy-filtered: no files match bbox');
+    log('No building files match viewport', 'success');
     return;
   }
 
+  log(`Loading buildings (${files.length}/${totalFiles} files)...`);
   const fileList = files.map(f => `'${f}'`).join(',');
   await conn.query(`
     CREATE TABLE buildings AS
     SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
     FROM read_parquet([${fileList}], hive_partitioning=false) b
     WHERE ${bboxFilter(bbox, 'b')}`);
-  console.log(`Proxy-filtered mode: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
+  console.log(`Proxy-filtered: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length}/${totalFiles} files`);
 }
 
 async function loadBuildings() {
@@ -260,12 +262,12 @@ async function loadBuildings() {
     }
 
     if (!useCache) {
-      log(`Loading buildings (${mode} mode)...`);
       const files = await listFiles('buildings', 'building');
+      log(`Loading buildings (${files.length} files, ${mode})...`);
       await conn.query(`DROP TABLE IF EXISTS buildings`);
 
       if (mode === 'proxy') {
-        await loadBuildingsProxyFiltered(bbox);
+        await loadBuildingsProxyFiltered(bbox, files.length);
       } else {
         await loadBuildingsAllFiles(bbox, files);
       }
