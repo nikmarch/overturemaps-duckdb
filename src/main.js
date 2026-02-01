@@ -1,7 +1,8 @@
 import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
 
 const $ = id => document.getElementById(id);
-const PROXY = `${location.origin}/s3`;
+// TODO: Replace YOUR_SUBDOMAIN with your Cloudflare account subdomain
+const PROXY = 'https://overture-s3-proxy.YOUR_SUBDOMAIN.workers.dev';
 const RELEASE = '2026-01-21.0';
 const CACHE_KEY = `overture_files_${RELEASE}_${location.origin}`;
 
