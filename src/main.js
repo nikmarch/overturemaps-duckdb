@@ -40,6 +40,7 @@ $('distanceSlider').oninput = () => $('distanceValue').textContent = $('distance
 $('catHeader').onclick = () => $('categories').classList.toggle('visible');
 $('loadPlacesBtn').onclick = loadPlaces;
 $('loadBuildingsBtn').onclick = loadBuildings;
+$('intersectCheck').onchange = findIntersections;
 
 map.on('moveend', () => {
   const c = map.getCenter();
@@ -89,12 +90,12 @@ async function listFiles(theme, type) {
   return files;
 }
 
-function renderBuilding(geojson) {
+function renderBuilding(geojson, id) {
   const layer = L.geoJSON(JSON.parse(geojson), {
     style: { fillColor: '#3388ff', color: '#2266cc', weight: 1, fillOpacity: 0.5 }
   });
   layer.addTo(buildingsLayer);
-  buildingMarkers.push({ layer });
+  buildingMarkers.push({ layer, id, geojson });
 }
 
 function filterPlaces() {
@@ -169,7 +170,7 @@ async function loadPlaces() {
       log('Querying cached places...');
     }
 
-    const rows = (await conn.query(`SELECT name, cat, lon, lat FROM places WHERE ${pointFilter(bbox)}`)).toArray();
+    const rows = (await conn.query(`SELECT id, name, cat, lon, lat FROM places WHERE ${pointFilter(bbox)}`)).toArray();
     const catCounts = {};
 
     for (const r of rows) {
@@ -180,7 +181,7 @@ async function loadPlaces() {
           radius: 5, fillColor: '#e74c3c', color: '#c0392b', weight: 1, fillOpacity: 0.8
         }).bindPopup(`<b>${r.name || '?'}</b><br>${cat}`);
         marker.addTo(placesLayer);
-        placeMarkers.push({ marker, cat });
+        placeMarkers.push({ marker, cat, id: r.id, lat: r.lat, lon: r.lon });
       }
     }
 
@@ -225,13 +226,13 @@ async function loadBuildings() {
     }
 
     const rows = (await conn.query(`
-      SELECT DISTINCT b.geojson FROM buildings b
+      SELECT DISTINCT b.id, b.geojson FROM buildings b
       JOIN places p ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
                    AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
       WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')}
     `)).toArray();
 
-    for (const r of rows) if (r.geojson) renderBuilding(r.geojson);
+    for (const r of rows) if (r.geojson) renderBuilding(r.geojson, r.id);
 
     log(`${buildingMarkers.length} buildings ${useCache ? 'cached' : 'loaded'}`, 'success');
   } catch (e) {
@@ -239,6 +240,79 @@ async function loadBuildings() {
     console.error(e);
   } finally {
     $('loadBuildingsBtn').disabled = false;
+  }
+}
+
+async function findIntersections() {
+  const checked = $('intersectCheck').checked;
+  const bbox = getBbox();
+  const d = parseInt($('distanceSlider').value) / 111000;
+
+  if (!checked) {
+    // Reset to default colors
+    for (const { marker } of placeMarkers) {
+      marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' });
+    }
+    for (const { layer } of buildingMarkers) {
+      layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' });
+    }
+    log(`${placeMarkers.length} places, ${buildingMarkers.length} buildings`, 'success');
+    return;
+  }
+
+  try {
+    const tables = (await conn.query(`SHOW TABLES`)).toArray();
+    if (!tables.some(t => t.name === 'buildings')) {
+      log('Load buildings first', 'error');
+      $('intersectCheck').checked = false;
+      return;
+    }
+
+    log('Finding intersections...');
+
+    // Find places that have nearby buildings
+    const placesWithBuildings = new Set(
+      (await conn.query(`
+        SELECT DISTINCT p.id FROM places p
+        JOIN buildings b ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
+                       AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
+        WHERE ${pointFilter(bbox, 'p')}
+      `)).toArray().map(r => r.id)
+    );
+
+    // Find buildings that have nearby places
+    const buildingsWithPlaces = new Set(
+      (await conn.query(`
+        SELECT DISTINCT b.id FROM buildings b
+        JOIN places p ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
+                     AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
+        WHERE ${pointFilter(bbox, 'p')}
+      `)).toArray().map(r => r.id)
+    );
+
+    let matched = 0, unmatched = 0;
+    for (const { marker, id } of placeMarkers) {
+      if (placesWithBuildings.has(id)) {
+        marker.setStyle({ fillColor: '#27ae60', color: '#1e8449' }); // green
+        matched++;
+      } else {
+        marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' }); // red
+        unmatched++;
+      }
+    }
+
+    for (const { layer, id } of buildingMarkers) {
+      if (buildingsWithPlaces.has(id)) {
+        layer.setStyle({ fillColor: '#27ae60', color: '#1e8449' }); // green
+      } else {
+        layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' }); // blue
+      }
+    }
+
+    log(`${matched} matched, ${unmatched} unmatched places`, 'success');
+  } catch (e) {
+    log(`Error: ${e.message}`, 'error');
+    console.error(e);
   }
 }
 
