@@ -2,19 +2,19 @@ name: Deploy to Cloudflare
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch:
+
+env:
+  CLOUDFLARE_SUBDOMAIN: marchen
 
 jobs:
   deploy-worker:
     runs-on: ubuntu-latest
-    outputs:
-      worker_url: ${{ steps.deploy.outputs.deployment-url }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Deploy Worker
-        id: deploy
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -25,6 +25,9 @@ jobs:
     needs: deploy-worker
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set worker URL
+        run: sed -i "s/YOUR_SUBDOMAIN/${{ env.CLOUDFLARE_SUBDOMAIN }}/" src/main.js
 
       - name: Deploy Pages
         uses: cloudflare/wrangler-action@v3
