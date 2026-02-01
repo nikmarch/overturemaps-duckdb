@@ -9,28 +9,71 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   right: 10px;
   z-index: 1000;
   background: white;
-  padding: 20px;
+  padding: 16px;
   border-radius: 12px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
   min-width: 260px;
 }
 
-#status {
-  font-size: 13px;
+#controlsHeader {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+#collapseBtn {
+  padding: 0 12px;
+  font-size: 18px;
+  font-weight: bold;
+  line-height: 1;
+  background: #f0f0f0;
   color: #666;
-  padding: 10px 12px;
+  border-radius: 6px;
+}
+#collapseBtn:hover:not(:disabled) {
+  background: #e0e0e0;
+  transform: none;
+}
+
+#controlsBody {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 16px;
+}
+#controlsBody.collapsed { display: none; }
+
+#status {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: #666;
+  padding: 12px 14px;
   background: #f8f9fa;
   border-radius: 8px;
   display: flex;
   align-items: center;
   gap: 8px;
 }
-#status.loading { background: #fff3cd; color: #856404; }
+#status.loading {
+  background: #fff3cd;
+  color: #856404;
+  animation: pulse 1.5s ease-in-out infinite;
+}
 #status.error { background: #f8d7da; color: #721c24; }
 #status.success { background: #d4edda; color: #155724; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.status-totals {
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.8;
+  margin-left: auto;
+}
 
 .spinner {
   width: 14px;
@@ -81,6 +124,22 @@ input[type="range"]::-webkit-slider-thumb {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
 }
 
+.radio-row {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+}
+.radio-row label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 400;
+}
+.radio-row input[type="radio"] {
+  width: 14px;
+  height: 14px;
+}
+
 .btn-row { display: flex; gap: 8px; }
 .btn-row button { flex: 1; }
 
@@ -125,3 +184,25 @@ button:disabled { background: #ccc; cursor: not-allowed; }
 .cat-count { color: #888; font-size: 11px; margin-left: 4px; }
 .cat-buttons { display: flex; gap: 8px; margin-bottom: 8px; }
 .cat-buttons button { padding: 4px 10px; font-size: 11px; }
+
+#legend {
+  background: #f8f9fa;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 12px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+.dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot.green { background: #27ae60; }
+.dot.red { background: #e74c3c; }
+.dot.blue { background: #3388ff; }

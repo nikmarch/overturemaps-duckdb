@@ -1,7 +1,7 @@
 import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
 
 const $ = id => document.getElementById(id);
-const PROXY = 'https://overture-s3-proxy.YOUR_SUBDOMAIN.workers.dev';
+const PROXY = 'https://overture-s3-proxy.nik-d71.workers.dev';
 const RELEASE = '2026-01-21.0';
 const CACHE_KEY = `overture_files_${RELEASE}_${location.origin}`;
 
@@ -41,6 +41,12 @@ $('catHeader').onclick = () => $('categories').classList.toggle('visible');
 $('loadPlacesBtn').onclick = loadPlaces;
 $('loadBuildingsBtn').onclick = loadBuildings;
 $('intersectCheck').onchange = findIntersections;
+$('collapseBtn').onclick = () => {
+  const body = $('controlsBody');
+  const btn = $('collapseBtn');
+  body.classList.toggle('collapsed');
+  btn.textContent = body.classList.contains('collapsed') ? '+' : '−';
+};
 
 map.on('moveend', () => {
   const c = map.getCenter();
@@ -48,8 +54,18 @@ map.on('moveend', () => {
 });
 
 function log(msg, type = 'loading') {
-  $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>`;
+  const totals = [];
+  if (placeMarkers.length) totals.push(`${placeMarkers.length.toLocaleString()} places`);
+  if (buildingMarkers.length) totals.push(`${buildingMarkers.length.toLocaleString()} buildings`);
+  const totalsHtml = totals.length ? `<span class="status-totals">${totals.join(' | ')}</span>` : '';
+  $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>${totalsHtml}`;
   $('status').className = type;
+
+  // Auto-expand controls when loading
+  if (type === 'loading') {
+    $('controlsBody').classList.remove('collapsed');
+    $('collapseBtn').textContent = '−';
+  }
 }
 
 function getBbox() {
@@ -195,10 +211,42 @@ async function loadPlaces() {
   }
 }
 
+async function loadBuildingsAllFiles(bbox, files) {
+  const fileList = files.map(f => `'${f}'`).join(',');
+  const start = performance.now();
+  await conn.query(`
+    CREATE TABLE buildings AS
+    SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
+    FROM read_parquet([${fileList}], hive_partitioning=false) b
+    WHERE ${bboxFilter(bbox, 'b')}`);
+  console.log(`All files mode: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
+}
+
+async function loadBuildingsProxyFiltered(bbox) {
+  const start = performance.now();
+  const url = `${PROXY}/files/buildings?xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
+  const response = await fetch(url);
+  const files = await response.json();
+
+  if (files.length === 0) {
+    console.log('Proxy-filtered: no files match bbox');
+    return;
+  }
+
+  const fileList = files.map(f => `'${f}'`).join(',');
+  await conn.query(`
+    CREATE TABLE buildings AS
+    SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
+    FROM read_parquet([${fileList}], hive_partitioning=false) b
+    WHERE ${bboxFilter(bbox, 'b')}`);
+  console.log(`Proxy-filtered mode: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
+}
+
 async function loadBuildings() {
   const bbox = getBbox();
   const d = parseInt($('distanceSlider').value) / 111000;
   const useCache = bboxContains(buildingsBbox, bbox);
+  const mode = document.querySelector('input[name="loadMode"]:checked').value;
 
   buildingsLayer.clearLayers();
   buildingMarkers = [];
@@ -212,14 +260,16 @@ async function loadBuildings() {
     }
 
     if (!useCache) {
-      log('Loading buildings from Overture...');
-      const files = (await listFiles('buildings', 'building')).map(f => `'${f}'`).join(',');
+      log(`Loading buildings (${mode} mode)...`);
+      const files = await listFiles('buildings', 'building');
       await conn.query(`DROP TABLE IF EXISTS buildings`);
-      await conn.query(`
-        CREATE TABLE buildings AS
-        SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
-        FROM read_parquet([${files}], hive_partitioning=false) b
-        WHERE ${bboxFilter(bbox, 'b')}`);
+
+      if (mode === 'proxy') {
+        await loadBuildingsProxyFiltered(bbox);
+      } else {
+        await loadBuildingsAllFiles(bbox, files);
+      }
+
       buildingsBbox = { ...bbox };
     } else {
       log('Querying cached buildings...');
@@ -248,8 +298,9 @@ async function findIntersections() {
   const bbox = getBbox();
   const d = parseInt($('distanceSlider').value) / 111000;
 
+  $('legend').style.display = checked ? 'block' : 'none';
+
   if (!checked) {
-    // Reset to default colors
     for (const { marker } of placeMarkers) {
       marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' });
     }
