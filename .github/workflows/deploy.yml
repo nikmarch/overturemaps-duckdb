@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  CLOUDFLARE_SUBDOMAIN: marchen
+  CLOUDFLARE_SUBDOMAIN: nik-d71
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
