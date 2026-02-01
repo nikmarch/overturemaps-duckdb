@@ -5,6 +5,7 @@ export default {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
       'Access-Control-Allow-Headers': '*',
+      'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
     };
 
     if (request.method === 'OPTIONS') {
@@ -14,7 +15,6 @@ export default {
     const cache = caches.default;
     const isListing = url.search.includes('prefix=');
 
-    // Check cache for file listings
     if (isListing) {
       const cached = await cache.match(request);
       if (cached) {
@@ -24,20 +24,39 @@ export default {
       }
     }
 
-    // Proxy to S3
     const s3Url = `https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com${url.pathname}${url.search}`;
-    const s3Response = await fetch(s3Url);
+
+    const s3Request = {
+      method: request.method,
+      headers: {},
+    };
+
+    if (request.headers.has('Range')) {
+      s3Request.headers['Range'] = request.headers.get('Range');
+    }
+
+    const s3Response = await fetch(s3Url, s3Request);
+
+    const responseHeaders = { ...corsHeaders };
+    responseHeaders['Content-Type'] = s3Response.headers.get('Content-Type') || 'application/octet-stream';
+
+    if (s3Response.headers.has('Content-Length')) {
+      responseHeaders['Content-Length'] = s3Response.headers.get('Content-Length');
+    }
+    if (s3Response.headers.has('Content-Range')) {
+      responseHeaders['Content-Range'] = s3Response.headers.get('Content-Range');
+    }
+    if (s3Response.headers.has('Accept-Ranges')) {
+      responseHeaders['Accept-Ranges'] = s3Response.headers.get('Accept-Ranges');
+    }
+
+    responseHeaders['Cache-Control'] = isListing ? 'public, max-age=86400' : 'no-store';
 
     const response = new Response(s3Response.body, {
       status: s3Response.status,
-      headers: {
-        ...corsHeaders,
-        'Content-Type': s3Response.headers.get('Content-Type') || 'application/xml',
-        'Cache-Control': isListing ? 'public, max-age=86400' : 'no-store',
-      }
+      headers: responseHeaders,
     });
 
-    // Cache listing responses
     if (isListing && s3Response.ok) {
       await cache.put(request, response.clone());
     }
