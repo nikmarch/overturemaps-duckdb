@@ -206,17 +206,6 @@ async function loadBuildingsAllFiles(bbox, files) {
   console.log(`All files mode: ${((performance.now() - start) / 1000).toFixed(1)}s`);
 }
 
-async function loadBuildingsGlob(bbox) {
-  const globUrl = `${PROXY}/release/${RELEASE}/theme=buildings/type=building/*.parquet`;
-  const start = performance.now();
-  await conn.query(`
-    CREATE TABLE buildings AS
-    SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
-    FROM read_parquet('${globUrl}', hive_partitioning=false) b
-    WHERE ${bboxFilter(bbox, 'b')}`);
-  console.log(`Glob mode: ${((performance.now() - start) / 1000).toFixed(1)}s`);
-}
-
 async function loadBuildingsChunked(bbox, files) {
   const chunkSize = 10;
   const start = performance.now();
@@ -263,9 +252,7 @@ async function loadBuildings() {
       const files = await listFiles('buildings', 'building');
       await conn.query(`DROP TABLE IF EXISTS buildings`);
 
-      if (mode === 'glob') {
-        await loadBuildingsGlob(bbox);
-      } else if (mode === 'chunked') {
+      if (mode === 'chunked') {
         await loadBuildingsChunked(bbox, files);
       } else {
         await loadBuildingsAllFiles(bbox, files);
