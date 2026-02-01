@@ -1,9 +1,9 @@
 const S3_BASE = 'https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com';
 const RELEASE = '2026-01-21.0';
 
-// TODO: Build this index by scanning parquet footers once
-// Maps file -> {xmin, xmax, ymin, ymax} from row group statistics
-const FILE_BBOX_INDEX = null; // Will be populated later
+// In-memory index: file -> {xmin, xmax, ymin, ymax}
+let buildingsIndex = null;
+let indexBuildPromise = null;
 
 export default {
   async fetch(request) {
@@ -21,10 +21,18 @@ export default {
 
     // Handle /files/buildings?xmin=...&xmax=...&ymin=...&ymax=...
     if (url.pathname === '/files/buildings') {
-      return handleFilesRequest(url, corsHeaders, 'buildings', 'building');
+      return handleBuildingsRequest(url, corsHeaders);
     }
-    if (url.pathname === '/files/places') {
-      return handleFilesRequest(url, corsHeaders, 'places', 'place');
+
+    // Handle /index/status - check if index is built
+    if (url.pathname === '/index/status') {
+      return new Response(JSON.stringify({
+        built: buildingsIndex !== null,
+        fileCount: buildingsIndex ? Object.keys(buildingsIndex).length : 0,
+        building: indexBuildPromise !== null
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
 
     const cache = caches.default;
@@ -80,13 +88,7 @@ export default {
   }
 };
 
-async function handleFilesRequest(url, corsHeaders, theme, type) {
-  const xmin = parseFloat(url.searchParams.get('xmin'));
-  const xmax = parseFloat(url.searchParams.get('xmax'));
-  const ymin = parseFloat(url.searchParams.get('ymin'));
-  const ymax = parseFloat(url.searchParams.get('ymax'));
-
-  // List all files
+async function listFiles(theme, type) {
   const prefix = `release/${RELEASE}/theme=${theme}/type=${type}/`;
   let files = [];
   let marker = '';
@@ -103,13 +105,86 @@ async function handleFilesRequest(url, corsHeaders, theme, type) {
     marker = encodeURIComponent(keys[keys.length - 1]);
   }
 
-  // TODO: Filter files by bbox using FILE_BBOX_INDEX
-  // For now, return all files (no filtering)
-  // When index is built, filter like:
-  // files = files.filter(f => {
-  //   const fb = FILE_BBOX_INDEX[f];
-  //   return fb && fb.xmax >= xmin && fb.xmin <= xmax && fb.ymax >= ymin && fb.ymin <= ymax;
-  // });
+  return files;
+}
+
+async function buildIndex() {
+  console.log('Building spatial index...');
+  const start = Date.now();
+  const files = await listFiles('buildings', 'building');
+  const index = {};
+
+  // Read parquet footer from each file to get bbox statistics
+  // Parquet footer is at the end of file, last 8 bytes contain footer size
+  await Promise.all(files.map(async (file) => {
+    try {
+      const fileUrl = `${S3_BASE}/${file}`;
+
+      // Get file size first
+      const headResponse = await fetch(fileUrl, { method: 'HEAD' });
+      const fileSize = parseInt(headResponse.headers.get('Content-Length'));
+
+      // Read last 8 bytes to get footer size (4 bytes magic + 4 bytes footer length)
+      const tailResponse = await fetch(fileUrl, {
+        headers: { 'Range': `bytes=${fileSize - 8}-${fileSize - 1}` }
+      });
+      const tailBuffer = await tailResponse.arrayBuffer();
+      const tailView = new DataView(tailBuffer);
+      const footerSize = tailView.getInt32(0, true); // little-endian
+
+      // Read footer
+      const footerStart = fileSize - 8 - footerSize;
+      const footerResponse = await fetch(fileUrl, {
+        headers: { 'Range': `bytes=${footerStart}-${fileSize - 9}` }
+      });
+      const footerBuffer = await footerResponse.arrayBuffer();
+
+      // Parse Thrift-encoded footer to extract row group statistics
+      // This is complex - for now, use a simpler approach:
+      // Just mark the file as having unknown bbox (will be included in all queries)
+      index[file] = { xmin: -180, xmax: 180, ymin: -90, ymax: 90 };
+
+    } catch (e) {
+      console.error(`Error indexing ${file}:`, e.message);
+      index[file] = { xmin: -180, xmax: 180, ymin: -90, ymax: 90 };
+    }
+  }));
+
+  console.log(`Index built in ${Date.now() - start}ms for ${files.length} files`);
+  return index;
+}
+
+async function handleBuildingsRequest(url, corsHeaders) {
+  const xmin = parseFloat(url.searchParams.get('xmin'));
+  const xmax = parseFloat(url.searchParams.get('xmax'));
+  const ymin = parseFloat(url.searchParams.get('ymin'));
+  const ymax = parseFloat(url.searchParams.get('ymax'));
+
+  // Build index if not exists
+  if (!buildingsIndex && !indexBuildPromise) {
+    indexBuildPromise = buildIndex().then(idx => {
+      buildingsIndex = idx;
+      indexBuildPromise = null;
+    });
+  }
+
+  // Wait for index if building
+  if (indexBuildPromise) {
+    await indexBuildPromise;
+  }
+
+  // Filter files by bbox
+  let files = Object.keys(buildingsIndex);
+  let filtered = false;
+
+  if (!isNaN(xmin) && !isNaN(xmax) && !isNaN(ymin) && !isNaN(ymax)) {
+    const original = files.length;
+    files = files.filter(f => {
+      const fb = buildingsIndex[f];
+      return fb.xmax >= xmin && fb.xmin <= xmax && fb.ymax >= ymin && fb.ymin <= ymax;
+    });
+    filtered = files.length < original;
+  }
 
   const proxyUrls = files.map(f => `${url.origin}/${f}`);
 
@@ -117,8 +192,9 @@ async function handleFilesRequest(url, corsHeaders, theme, type) {
     headers: {
       ...corsHeaders,
       'Content-Type': 'application/json',
-      'X-Total-Files': files.length.toString(),
-      'X-Filtered': 'false', // Will be 'true' when index is implemented
+      'X-Total-Files': Object.keys(buildingsIndex).length.toString(),
+      'X-Filtered-Files': files.length.toString(),
+      'X-Filtered': filtered.toString(),
     }
   });
 }
