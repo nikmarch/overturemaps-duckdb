@@ -282,8 +282,9 @@ async function findIntersections() {
   const bbox = getBbox();
   const d = parseInt($('distanceSlider').value) / 111000;
 
+  $('legend').style.display = checked ? 'block' : 'none';
+
   if (!checked) {
-    // Reset to default colors
     for (const { marker } of placeMarkers) {
       marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' });
     }
