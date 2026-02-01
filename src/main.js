@@ -233,7 +233,7 @@ async function loadBuildingsProxyFiltered(bbox) {
     SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
     FROM read_parquet([${fileList}], hive_partitioning=false) b
     WHERE ${bboxFilter(bbox, 'b')}`);
-  console.log(`Proxy-filtered mode: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length}/${236} files`);
+  console.log(`Proxy-filtered mode: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
 }
 
 async function loadBuildings() {
