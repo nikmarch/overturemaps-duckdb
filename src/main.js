@@ -14,14 +14,26 @@ const placesLayer = L.layerGroup();
 const buildingsLayer = L.layerGroup();
 const fileCache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
 
+const DEFAULT_VIEW = [34.05, -118.25];
+const DEFAULT_ZOOM = 14;
+
 const [z, lat, lon] = (location.hash.slice(1) || '').split('/').map(Number);
+const hasHash = !isNaN(lat) && !isNaN(lon);
+
 const map = L.map('map').setView(
-  !isNaN(lat) && !isNaN(lon) ? [lat, lon] : [34.05, -118.25],
-  !isNaN(z) ? z : 14
+  hasHash ? [lat, lon] : DEFAULT_VIEW,
+  hasHash && !isNaN(z) ? z : DEFAULT_ZOOM
 );
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 placesLayer.addTo(map);
 buildingsLayer.addTo(map);
+
+if (!hasHash && navigator.geolocation) {
+  navigator.geolocation.getCurrentPosition(
+    pos => map.setView([pos.coords.latitude, pos.coords.longitude], DEFAULT_ZOOM),
+    () => {}
+  );
+}
 
 $('limitSlider').oninput = () => $('limitValue').textContent = parseInt($('limitSlider').value).toLocaleString();
 $('distanceSlider').oninput = () => $('distanceValue').textContent = $('distanceSlider').value + 'm';
