@@ -9,8 +9,6 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
-  },
-  optimizeDeps: {
-    exclude: ['@duckdb/duckdb-wasm'],
+    allowedHosts: true,
   },
 });
