@@ -1,3 +1,12 @@
 name = "overture-s3-proxy"
 main = "index.js"
 compatibility_date = "2024-01-01"
+
+[durable_objects]
+bindings = [
+  { name = "SPATIAL_INDEX", class_name = "SpatialIndex" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SpatialIndex"]

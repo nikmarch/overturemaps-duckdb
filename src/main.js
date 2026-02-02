@@ -1,7 +1,10 @@
 import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
 
 const $ = id => document.getElementById(id);
-const PROXY = 'https://overture-s3-proxy.nik-d71.workers.dev';
+// Use local worker for development: set USE_LOCAL_WORKER=true or access via localhost/zarbazan
+const USE_LOCAL_WORKER = false; // CI sets this to false for production
+const isLocal = USE_LOCAL_WORKER || ['localhost', 'zarbazan'].includes(location.hostname);
+const PROXY = isLocal ? 'http://localhost:8787' : 'https://overture-s3-proxy.nik-d71.workers.dev';
 const RELEASE = '2026-01-21.0';
 const CACHE_KEY = `overture_files_${RELEASE}_${location.origin}`;
 
@@ -30,8 +33,11 @@ buildingsLayer.addTo(map);
 
 if (!hasHash && navigator.geolocation) {
   navigator.geolocation.getCurrentPosition(
-    pos => map.setView([pos.coords.latitude, pos.coords.longitude], DEFAULT_ZOOM),
-    () => {}
+    pos => {
+      console.log('Geolocation:', pos.coords.latitude, pos.coords.longitude);
+      map.setView([pos.coords.latitude, pos.coords.longitude], DEFAULT_ZOOM);
+    },
+    err => console.log('Geolocation error:', err.message)
   );
 }
 
@@ -198,17 +204,23 @@ async function loadPlaces() {
 
   try {
     if (!useCache) {
-      const fileList = await listFiles('places', 'place');
-      log(`Loading places (${fileList.length} files)...`);
-      const files = fileList.map(f => `'${f}'`).join(',');
+      log('Getting filtered file list...');
+      const { files: smartFiles, total } = await getSmartFilteredFiles('places', bbox);
+      log(`Loading places (${smartFiles.length}/${total} files)...`);
+
       await conn.query(`DROP TABLE IF EXISTS places`);
-      await conn.query(`
-        CREATE TABLE places AS
-        SELECT id, names.primary as name, categories.primary as cat,
-               ST_X(geometry) as lon, ST_Y(geometry) as lat, geometry, bbox
-        FROM read_parquet([${files}], hive_partitioning=false)
-        WHERE ${bboxFilter(bbox)}
-        LIMIT ${limit}`);
+      if (smartFiles.length > 0) {
+        const files = smartFiles.map(f => `'${f}'`).join(',');
+        await conn.query(`
+          CREATE TABLE places AS
+          SELECT id, names.primary as name, categories.primary as cat,
+                 ST_X(geometry) as lon, ST_Y(geometry) as lat, geometry, bbox
+          FROM read_parquet([${files}], hive_partitioning=false)
+          WHERE ${bboxFilter(bbox)}
+          LIMIT ${limit}`);
+      } else {
+        await conn.query(`CREATE TABLE places (id VARCHAR, name VARCHAR, cat VARCHAR, lon DOUBLE, lat DOUBLE, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
+      }
       placesBbox = { ...bbox };
     } else {
       log('Querying cached places...');
@@ -240,7 +252,7 @@ async function loadPlaces() {
   }
 }
 
-async function loadBuildingsAllFiles(bbox, files) {
+async function loadBuildingsFromFiles(bbox, files, label) {
   const fileList = files.map(f => `'${f}'`).join(',');
   const start = performance.now();
   await conn.query(`
@@ -248,13 +260,22 @@ async function loadBuildingsAllFiles(bbox, files) {
     SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
     FROM read_parquet([${fileList}], hive_partitioning=false) b
     WHERE ${bboxFilter(bbox, 'b')}`);
-  console.log(`All files: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
+  console.log(`${label}: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
+}
+
+async function getSmartFilteredFiles(dataType, bbox) {
+  const url = `${PROXY}/files/${dataType}?xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
+  const response = await fetch(url);
+  const files = await response.json();
+  const total = response.headers.get('X-Total-Files') || '?';
+  return { files, total };
 }
 
 async function loadBuildings() {
   const bbox = getBbox();
   const d = parseInt($('distanceSlider').value) / 111000;
   const useCache = bboxContains(buildingsBbox, bbox);
+  const mode = document.querySelector('input[name="loadMode"]:checked')?.value || 'smart';
 
   buildingsLayer.clearLayers();
   buildingMarkers = [];
@@ -268,10 +289,23 @@ async function loadBuildings() {
     }
 
     if (!useCache) {
-      const files = await listFiles('buildings', 'building');
-      log(`Loading buildings (${files.length} files)...`);
       await conn.query(`DROP TABLE IF EXISTS buildings`);
-      await loadBuildingsAllFiles(bbox, files);
+
+      if (mode === 'smart') {
+        log('Getting filtered file list...');
+        const { files, total } = await getSmartFilteredFiles('buildings', bbox);
+        log(`Loading buildings (${files.length}/${total} files)...`);
+        if (files.length > 0) {
+          await loadBuildingsFromFiles(bbox, files, 'Smart filter');
+        } else {
+          await conn.query(`CREATE TABLE buildings (id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
+        }
+      } else {
+        const files = await listFiles('buildings', 'building');
+        log(`Loading buildings (${files.length} files)...`);
+        await loadBuildingsFromFiles(bbox, files, 'All files');
+      }
+
       buildingsBbox = { ...bbox };
     } else {
       log('Querying cached buildings...');

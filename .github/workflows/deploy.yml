@@ -3,6 +3,8 @@ name: Deploy to Cloudflare
 on:
   push:
     branches: [main, master]
+  pull_request:
+    branches: [main, master]
   workflow_dispatch:
 
 env:
@@ -13,6 +15,10 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -21,15 +27,39 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install worker dependencies
+        run: npm install
+        working-directory: worker
+
       - name: Deploy Worker
         run: npx wrangler deploy
         working-directory: worker
 
-      - name: Set worker URL
-        run: sed -i "s/YOUR_SUBDOMAIN/${{ env.CLOUDFLARE_SUBDOMAIN }}/" src/main.js
+      - name: Ensure production config
+        run: |
+          # Ensure USE_LOCAL_WORKER is false for production builds
+          grep -q "USE_LOCAL_WORKER = false" src/main.js || sed -i 's/USE_LOCAL_WORKER = true/USE_LOCAL_WORKER = false/' src/main.js
 
       - name: Create Pages project if needed
         run: npx wrangler pages project create overture-maps --production-branch=master 2>/dev/null || true
 
-      - name: Deploy Pages
+      - name: Deploy Pages (production)
+        if: github.event_name == 'push'
         run: npx wrangler pages deploy src --project-name=overture-maps --commit-dirty=true
+
+      - name: Deploy Pages (preview)
+        if: github.event_name == 'pull_request'
+        run: npx wrangler pages deploy src --project-name=overture-maps --commit-dirty=true --branch=${{ github.head_ref }}
+
+      - name: Comment preview URL on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = '${{ github.head_ref }}'.replace(/\//g, '-');
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `🚀 Preview deployed to: https://${branch}.overture-maps.pages.dev`
+            })
