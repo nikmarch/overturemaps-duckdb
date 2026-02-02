@@ -2,9 +2,8 @@
 
 Browser-based viewer for [Overture Maps](https://overturemaps.org/) data using DuckDB-WASM to query Parquet files directly from S3.
 
-![Screenshot](https://share.cleanshot.com/PmZyWsJr)
-
-![Intersection View](https://share.cleanshot.com/hvNyksFq)
+![Screenshot](https://github.com/user-attachments/assets/ae3ff9ad-fbf7-4834-86d0-920fa4ddbe65)
+![Intersection View](https://github.com/user-attachments/assets/45116629-243c-4c42-a5d4-61e74d9dfa66)
 
 ## Features
 
