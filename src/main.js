@@ -33,8 +33,11 @@ buildingsLayer.addTo(map);
 
 if (!hasHash && navigator.geolocation) {
   navigator.geolocation.getCurrentPosition(
-    pos => map.setView([pos.coords.latitude, pos.coords.longitude], DEFAULT_ZOOM),
-    () => {}
+    pos => {
+      console.log('Geolocation:', pos.coords.latitude, pos.coords.longitude);
+      map.setView([pos.coords.latitude, pos.coords.longitude], DEFAULT_ZOOM);
+    },
+    err => console.log('Geolocation error:', err.message)
   );
 }
 
