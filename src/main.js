@@ -31,15 +31,6 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 placesLayer.addTo(map);
 buildingsLayer.addTo(map);
 
-if (!hasHash && navigator.geolocation) {
-  navigator.geolocation.getCurrentPosition(
-    pos => {
-      console.log('Geolocation:', pos.coords.latitude, pos.coords.longitude);
-      map.setView([pos.coords.latitude, pos.coords.longitude], DEFAULT_ZOOM);
-    },
-    err => console.log('Geolocation error:', err.message)
-  );
-}
 
 let lastLimit = parseInt($('limitSlider').value);
 $('limitSlider').oninput = () => {
