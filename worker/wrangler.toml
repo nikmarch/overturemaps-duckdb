@@ -9,4 +9,4 @@ bindings = [
 
 [[migrations]]
 tag = "v1"
-new_classes = ["SpatialIndex"]
+new_sqlite_classes = ["SpatialIndex"]
