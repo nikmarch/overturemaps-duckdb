@@ -75,25 +75,22 @@ async function updateCachedCounts() {
   } catch (e) { /* ignore */ }
 }
 
-function log(msg, type = 'loading') {
-  const shown = [];
-  if (placeMarkers.length) shown.push(`${placeMarkers.length.toLocaleString()}p`);
-  if (buildingMarkers.length) shown.push(`${buildingMarkers.length.toLocaleString()}b`);
-
+function updateStats() {
   const cached = [];
-  if (cachedPlacesCount) cached.push(`${cachedPlacesCount.toLocaleString()}p`);
-  if (cachedBuildingsCount) cached.push(`${cachedBuildingsCount.toLocaleString()}b`);
+  if (cachedPlacesCount) cached.push(`${cachedPlacesCount.toLocaleString()} places`);
+  if (cachedBuildingsCount) cached.push(`${cachedBuildingsCount.toLocaleString()} buildings`);
+  $('cachedStats').textContent = cached.length ? cached.join(', ') : '-';
 
-  let totalsHtml = '';
-  if (shown.length || cached.length) {
-    const parts = [];
-    if (shown.length) parts.push(`shown: ${shown.join('/')}`);
-    if (cached.length) parts.push(`cached: ${cached.join('/')}`);
-    totalsHtml = `<span class="status-totals">${parts.join(' | ')}</span>`;
-  }
+  const shown = [];
+  if (placeMarkers.length) shown.push(`${placeMarkers.length.toLocaleString()} places`);
+  if (buildingMarkers.length) shown.push(`${buildingMarkers.length.toLocaleString()} buildings`);
+  $('shownStats').textContent = shown.length ? shown.join(', ') : '-';
+}
 
-  $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>${totalsHtml}`;
+function log(msg, type = 'loading') {
+  $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>`;
   $('status').className = type;
+  updateStats();
 
   if (type === 'loading') {
     $('controlsBody').classList.remove('collapsed');
@@ -159,6 +156,7 @@ function filterPlaces() {
     }
   }
   log(`${visible.toLocaleString()} places visible`, 'success');
+  updateStats();
 }
 
 function buildCategoryUI(catCounts) {
@@ -243,7 +241,7 @@ async function loadPlaces() {
 
     buildCategoryUI(Object.entries(catCounts).sort((a, b) => b[1] - a[1]));
     await updateCachedCounts();
-    log(`Loaded ${placeMarkers.length} places`, 'success');
+    log(`Loaded ${placeMarkers.length.toLocaleString()} places`, 'success');
   } catch (e) {
     log(`Error: ${e.message}`, 'error');
     console.error(e);
@@ -321,7 +319,7 @@ async function loadBuildings() {
     for (const r of rows) if (r.geojson) renderBuilding(r.geojson, r.id);
 
     await updateCachedCounts();
-    log(`Loaded ${buildingMarkers.length} buildings`, 'success');
+    log(`Loaded ${buildingMarkers.length.toLocaleString()} buildings`, 'success');
   } catch (e) {
     log(`Error: ${e.message}`, 'error');
     console.error(e);
@@ -338,11 +336,15 @@ async function findIntersections() {
   $('legend').style.display = checked ? 'block' : 'none';
 
   if (!checked) {
+    // Show all places in default red
     for (const { marker } of placeMarkers) {
       marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' });
+      if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
     }
+    // Show all buildings in default blue
     for (const { layer } of buildingMarkers) {
       layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' });
+      if (!buildingsLayer.hasLayer(layer)) buildingsLayer.addLayer(layer);
     }
     log(`${placeMarkers.length} places, ${buildingMarkers.length} buildings`, 'success');
     return;
@@ -382,22 +384,28 @@ async function findIntersections() {
     for (const { marker, id } of placeMarkers) {
       if (placesWithBuildings.has(id)) {
         marker.setStyle({ fillColor: '#27ae60', color: '#1e8449' }); // green
+        if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
         matched++;
       } else {
         marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' }); // red
+        if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
         unmatched++;
       }
     }
 
+    // Only show buildings that intersect with places (green), hide others
+    let intersectingBuildings = 0;
     for (const { layer, id } of buildingMarkers) {
       if (buildingsWithPlaces.has(id)) {
         layer.setStyle({ fillColor: '#27ae60', color: '#1e8449' }); // green
+        if (!buildingsLayer.hasLayer(layer)) buildingsLayer.addLayer(layer);
+        intersectingBuildings++;
       } else {
-        layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' }); // blue
+        buildingsLayer.removeLayer(layer); // hide non-intersecting buildings
       }
     }
 
-    log(`${matched} matched, ${unmatched} unmatched places`, 'success');
+    log(`${matched} matched, ${unmatched} unmatched | ${intersectingBuildings} buildings shown`, 'success');
   } catch (e) {
     log(`Error: ${e.message}`, 'error');
     console.error(e);

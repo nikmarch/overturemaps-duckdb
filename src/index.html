@@ -17,6 +17,10 @@
       </div>
       <button id="collapseBtn" title="Toggle controls">−</button>
     </div>
+    <div id="statsBar">
+      <div class="stat"><span class="stat-label">Cached:</span> <span id="cachedStats">-</span></div>
+      <div class="stat"><span class="stat-label">Shown:</span> <span id="shownStats">-</span></div>
+    </div>
     <div id="controlsBody">
     <div class="slider-row">
       <div class="slider-header">
@@ -42,9 +46,8 @@
     </div>
     <label class="checkbox-row"><input type="checkbox" id="intersectCheck"> Find intersections</label>
     <div id="legend" style="display:none">
-      <div class="legend-item"><span class="dot green"></span> Place with nearby building</div>
+      <div class="legend-item"><span class="dot green"></span> Matched (place + building)</div>
       <div class="legend-item"><span class="dot red"></span> Place without building</div>
-      <div class="legend-item"><span class="dot blue"></span> Building (no nearby place)</div>
     </div>
     <div id="catSection" style="display:none">
       <div id="catHeader">

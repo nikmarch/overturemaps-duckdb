@@ -68,11 +68,25 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   50% { opacity: 0.7; }
 }
 
-.status-totals {
-  font-size: 11px;
-  font-weight: 400;
-  opacity: 0.8;
-  margin-left: auto;
+#statsBar {
+  display: flex;
+  gap: 16px;
+  padding: 8px 12px;
+  background: #f0f4f8;
+  border-radius: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.stat {
+  display: flex;
+  gap: 4px;
+}
+.stat-label {
+  color: #666;
+}
+#cachedStats, #shownStats {
+  font-weight: 600;
+  color: #333;
 }
 
 .spinner {
