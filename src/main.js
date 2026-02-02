@@ -240,7 +240,7 @@ async function loadPlaces() {
   }
 }
 
-async function loadBuildingsAllFiles(bbox, files) {
+async function loadBuildingsFromFiles(bbox, files, label) {
   const fileList = files.map(f => `'${f}'`).join(',');
   const start = performance.now();
   await conn.query(`
@@ -248,13 +248,22 @@ async function loadBuildingsAllFiles(bbox, files) {
     SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
     FROM read_parquet([${fileList}], hive_partitioning=false) b
     WHERE ${bboxFilter(bbox, 'b')}`);
-  console.log(`All files: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
+  console.log(`${label}: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
+}
+
+async function getSmartFilteredFiles(bbox) {
+  const url = `${PROXY}/files/buildings?xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
+  const response = await fetch(url);
+  const files = await response.json();
+  const total = response.headers.get('X-Total-Files') || '?';
+  return { files, total };
 }
 
 async function loadBuildings() {
   const bbox = getBbox();
   const d = parseInt($('distanceSlider').value) / 111000;
   const useCache = bboxContains(buildingsBbox, bbox);
+  const mode = document.querySelector('input[name="loadMode"]:checked')?.value || 'smart';
 
   buildingsLayer.clearLayers();
   buildingMarkers = [];
@@ -268,10 +277,23 @@ async function loadBuildings() {
     }
 
     if (!useCache) {
-      const files = await listFiles('buildings', 'building');
-      log(`Loading buildings (${files.length} files)...`);
       await conn.query(`DROP TABLE IF EXISTS buildings`);
-      await loadBuildingsAllFiles(bbox, files);
+
+      if (mode === 'smart') {
+        log('Getting filtered file list...');
+        const { files, total } = await getSmartFilteredFiles(bbox);
+        log(`Loading buildings (${files.length}/${total} files)...`);
+        if (files.length > 0) {
+          await loadBuildingsFromFiles(bbox, files, 'Smart filter');
+        } else {
+          await conn.query(`CREATE TABLE buildings (id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
+        }
+      } else {
+        const files = await listFiles('buildings', 'building');
+        log(`Loading buildings (${files.length} files)...`);
+        await loadBuildingsFromFiles(bbox, files, 'All files');
+      }
+
       buildingsBbox = { ...bbox };
     } else {
       log('Querying cached buildings...');
