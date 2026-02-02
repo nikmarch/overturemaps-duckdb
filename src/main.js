@@ -1,8 +1,7 @@
 import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
 
 const $ = id => document.getElementById(id);
-// Use local worker for development: set USE_LOCAL_WORKER=true or access via localhost/zarbazan
-const USE_LOCAL_WORKER = false; // CI sets this to false for production
+const USE_LOCAL_WORKER = false;
 const isLocal = USE_LOCAL_WORKER || ['localhost', 'zarbazan'].includes(location.hostname);
 const PROXY = isLocal ? 'http://localhost:8787' : 'https://overture-s3-proxy.nik-d71.workers.dev';
 const RELEASE = '2026-01-21.0';
@@ -37,7 +36,6 @@ $('limitSlider').oninput = () => {
   $('limitValue').textContent = parseInt($('limitSlider').value).toLocaleString();
   const newLimit = parseInt($('limitSlider').value);
   if (newLimit !== lastLimit) {
-    // Reset cache when limit changes
     placesBbox = null;
     buildingsBbox = null;
     lastLimit = newLimit;
@@ -57,7 +55,6 @@ $('collapseBtn').onclick = () => {
   localStorage.setItem('controlsCollapsed', isCollapsed);
 };
 
-// Restore collapsed state
 if (localStorage.getItem('controlsCollapsed') === 'true') {
   $('controlsBody').classList.add('collapsed');
   $('collapseBtn').textContent = '+';
@@ -68,7 +65,6 @@ map.on('moveend', () => {
   history.replaceState(null, '', `#${map.getZoom()}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`);
 });
 
-// Cached table counts
 let cachedPlacesCount = 0;
 let cachedBuildingsCount = 0;
 
@@ -231,7 +227,6 @@ async function loadPlaces() {
             WHERE ${bboxFilter(bbox)}
             LIMIT ${remaining}`);
 
-          // Render new places from this batch
           const newRows = (await conn.query(`
             SELECT id, name, cat, lon, lat FROM places
             WHERE ${pointFilter(bbox)}
@@ -302,7 +297,6 @@ async function loadBuildingsFromFiles(bbox, files, total, d) {
       FROM read_parquet([${fileList}], hive_partitioning=false) b
       WHERE ${bboxFilter(bbox, 'b')}`);
 
-    // Render buildings from this batch that contain places (or are within distance)
     const spatialCondition = d > 0
       ? `ST_DWithin(b.geometry, p.geometry, ${d})`
       : `ST_Contains(b.geometry, p.geometry)`;
@@ -398,12 +392,10 @@ async function findIntersections() {
   $('legend').style.display = checked ? 'block' : 'none';
 
   if (!checked) {
-    // Show all places in default red
     for (const { marker } of placeMarkers) {
       marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' });
       if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
     }
-    // Show all buildings in default blue
     for (const { layer } of buildingMarkers) {
       layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' });
       if (!buildingsLayer.hasLayer(layer)) buildingsLayer.addLayer(layer);
@@ -422,8 +414,6 @@ async function findIntersections() {
 
     log('Finding intersections...');
 
-    // Green = building actually contains the place (ST_Contains)
-    // Places inside buildings
     const placesWithBuildings = new Set(
       (await conn.query(`
         SELECT DISTINCT p.id FROM places p
@@ -433,7 +423,6 @@ async function findIntersections() {
       `)).toArray().map(r => r.id)
     );
 
-    // Buildings that contain places
     const buildingsWithPlaces = new Set(
       (await conn.query(`
         SELECT DISTINCT b.id FROM buildings b
@@ -446,24 +435,23 @@ async function findIntersections() {
     let matched = 0, unmatched = 0;
     for (const { marker, id } of placeMarkers) {
       if (placesWithBuildings.has(id)) {
-        marker.setStyle({ fillColor: '#27ae60', color: '#1e8449' }); // green
+        marker.setStyle({ fillColor: '#27ae60', color: '#1e8449' });
         if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
         matched++;
       } else {
-        marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' }); // red
+        marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' });
         if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
         unmatched++;
       }
     }
 
-    // Green = buildings that contain places, blue = nearby but not containing
     let containingBuildings = 0;
     for (const { layer, id } of buildingMarkers) {
       if (buildingsWithPlaces.has(id)) {
-        layer.setStyle({ fillColor: '#27ae60', color: '#1e8449' }); // green - contains place
+        layer.setStyle({ fillColor: '#27ae60', color: '#1e8449' });
         containingBuildings++;
       } else {
-        layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' }); // blue - nearby but not containing
+        layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' });
       }
       if (!buildingsLayer.hasLayer(layer)) buildingsLayer.addLayer(layer);
     }

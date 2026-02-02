@@ -4,6 +4,8 @@ Browser-based viewer for [Overture Maps](https://overturemaps.org/) data using D
 
 ![Screenshot](https://share.cleanshot.com/PmZyWsJr)
 
+![Intersection View](https://share.cleanshot.com/hvNyksFq)
+
 ## Features
 
 - Query Overture Maps places and buildings directly in the browser
