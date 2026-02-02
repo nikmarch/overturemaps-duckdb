@@ -299,12 +299,15 @@ async function loadBuildingsFromFiles(bbox, files, total, d) {
       FROM read_parquet([${fileList}], hive_partitioning=false) b
       WHERE ${bboxFilter(bbox, 'b')}`);
 
-    // Render buildings from this batch that are near places
+    // Render buildings from this batch that contain places (or are within distance)
+    const spatialCondition = d > 0
+      ? `ST_DWithin(b.geometry, p.geometry, ${d})`
+      : `ST_Contains(b.geometry, p.geometry)`;
     const newRows = (await conn.query(`
       SELECT DISTINCT b.id, b.geojson FROM buildings b
-      JOIN places p ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
-                   AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
-      WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')}
+      JOIN places p ON b.bbox.xmax >= p.lon - ${d} AND b.bbox.xmin <= p.lon + ${d}
+                   AND b.bbox.ymax >= p.lat - ${d} AND b.bbox.ymin <= p.lat + ${d}
+      WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')} AND ${spatialCondition}
     `)).toArray();
 
     for (const r of newRows) {
@@ -361,11 +364,14 @@ async function loadBuildings() {
       buildingsBbox = { ...bbox };
     } else {
       log('Querying cached buildings...');
+      const spatialCondition = d > 0
+        ? `ST_DWithin(b.geometry, p.geometry, ${d})`
+        : `ST_Contains(b.geometry, p.geometry)`;
       const rows = (await conn.query(`
         SELECT DISTINCT b.id, b.geojson FROM buildings b
-        JOIN places p ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
-                     AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
-        WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')}
+        JOIN places p ON b.bbox.xmax >= p.lon - ${d} AND b.bbox.xmin <= p.lon + ${d}
+                     AND b.bbox.ymax >= p.lat - ${d} AND b.bbox.ymin <= p.lat + ${d}
+        WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')} AND ${spatialCondition}
       `)).toArray();
 
       for (const r of rows) if (r.geojson) renderBuilding(r.geojson, r.id);
@@ -413,23 +419,29 @@ async function findIntersections() {
 
     log('Finding intersections...');
 
-    // Find places that have nearby buildings
+    // Use ST_Contains for precise matching, with optional distance buffer
+    // First filter by bbox for performance, then use actual geometry
+    const spatialCondition = d > 0
+      ? `ST_DWithin(b.geometry, p.geometry, ${d})`
+      : `ST_Contains(b.geometry, p.geometry)`;
+
+    // Find places that are inside buildings (or within distance)
     const placesWithBuildings = new Set(
       (await conn.query(`
         SELECT DISTINCT p.id FROM places p
-        JOIN buildings b ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
-                       AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
-        WHERE ${pointFilter(bbox, 'p')}
+        JOIN buildings b ON b.bbox.xmax >= p.lon - ${d} AND b.bbox.xmin <= p.lon + ${d}
+                       AND b.bbox.ymax >= p.lat - ${d} AND b.bbox.ymin <= p.lat + ${d}
+        WHERE ${pointFilter(bbox, 'p')} AND ${spatialCondition}
       `)).toArray().map(r => r.id)
     );
 
-    // Find buildings that have nearby places
+    // Find buildings that contain places (or have places within distance)
     const buildingsWithPlaces = new Set(
       (await conn.query(`
         SELECT DISTINCT b.id FROM buildings b
-        JOIN places p ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
-                     AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
-        WHERE ${pointFilter(bbox, 'p')}
+        JOIN places p ON b.bbox.xmax >= p.lon - ${d} AND b.bbox.xmin <= p.lon + ${d}
+                     AND b.bbox.ymax >= p.lat - ${d} AND b.bbox.ymin <= p.lat + ${d}
+        WHERE ${pointFilter(bbox, 'p')} AND ${spatialCondition}
       `)).toArray().map(r => r.id)
     );
 
