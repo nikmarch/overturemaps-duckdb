@@ -205,42 +205,73 @@ async function loadPlaces() {
     if (!useCache) {
       log('Getting filtered file list...');
       const { files: smartFiles, total } = await getSmartFilteredFiles('places', bbox);
-      log(`Loading places (${smartFiles.length}/${total} files)...`);
 
       await conn.query(`DROP TABLE IF EXISTS places`);
+      await conn.query(`CREATE TABLE places (id VARCHAR, name VARCHAR, cat VARCHAR, lon DOUBLE, lat DOUBLE, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
+
       if (smartFiles.length > 0) {
-        const files = smartFiles.map(f => `'${f}'`).join(',');
-        await conn.query(`
-          CREATE TABLE places AS
-          SELECT id, names.primary as name, categories.primary as cat,
-                 ST_X(geometry) as lon, ST_Y(geometry) as lat, geometry, bbox
-          FROM read_parquet([${files}], hive_partitioning=false)
-          WHERE ${bboxFilter(bbox)}
-          LIMIT ${limit}`);
-      } else {
-        await conn.query(`CREATE TABLE places (id VARCHAR, name VARCHAR, cat VARCHAR, lon DOUBLE, lat DOUBLE, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
+        const batchSize = 2;
+        let totalLoaded = 0;
+        const catCounts = {};
+
+        for (let i = 0; i < smartFiles.length && totalLoaded < limit; i += batchSize) {
+          const batch = smartFiles.slice(i, i + batchSize);
+          const remaining = limit - totalLoaded;
+          log(`Loading places (${i + batch.length}/${smartFiles.length} files, ${total} total)...`);
+
+          const files = batch.map(f => `'${f}'`).join(',');
+          await conn.query(`
+            INSERT INTO places
+            SELECT id, names.primary as name, categories.primary as cat,
+                   ST_X(geometry) as lon, ST_Y(geometry) as lat, geometry, bbox
+            FROM read_parquet([${files}], hive_partitioning=false)
+            WHERE ${bboxFilter(bbox)}
+            LIMIT ${remaining}`);
+
+          // Render new places from this batch
+          const newRows = (await conn.query(`
+            SELECT id, name, cat, lon, lat FROM places
+            WHERE ${pointFilter(bbox)}
+            LIMIT ${limit} OFFSET ${totalLoaded}
+          `)).toArray();
+
+          for (const r of newRows) {
+            const cat = r.cat || '';
+            catCounts[cat] = (catCounts[cat] || 0) + 1;
+            if (r.lat && r.lon) {
+              const marker = L.circleMarker([Number(r.lat), Number(r.lon)], {
+                radius: 5, fillColor: '#e74c3c', color: '#c0392b', weight: 1, fillOpacity: 0.8
+              }).bindPopup(`<b>${r.name || '?'}</b><br>${cat}`);
+              marker.addTo(placesLayer);
+              placeMarkers.push({ marker, cat, id: r.id, lat: r.lat, lon: r.lon });
+            }
+          }
+          totalLoaded += newRows.length;
+          updateStats();
+        }
+
+        buildCategoryUI(Object.entries(catCounts).sort((a, b) => b[1] - a[1]));
       }
       placesBbox = { ...bbox };
     } else {
       log('Querying cached places...');
-    }
+      const rows = (await conn.query(`SELECT id, name, cat, lon, lat FROM places WHERE ${pointFilter(bbox)}`)).toArray();
+      const catCounts = {};
 
-    const rows = (await conn.query(`SELECT id, name, cat, lon, lat FROM places WHERE ${pointFilter(bbox)}`)).toArray();
-    const catCounts = {};
-
-    for (const r of rows) {
-      const cat = r.cat || '';
-      catCounts[cat] = (catCounts[cat] || 0) + 1;
-      if (r.lat && r.lon) {
-        const marker = L.circleMarker([Number(r.lat), Number(r.lon)], {
-          radius: 5, fillColor: '#e74c3c', color: '#c0392b', weight: 1, fillOpacity: 0.8
-        }).bindPopup(`<b>${r.name || '?'}</b><br>${cat}`);
-        marker.addTo(placesLayer);
-        placeMarkers.push({ marker, cat, id: r.id, lat: r.lat, lon: r.lon });
+      for (const r of rows) {
+        const cat = r.cat || '';
+        catCounts[cat] = (catCounts[cat] || 0) + 1;
+        if (r.lat && r.lon) {
+          const marker = L.circleMarker([Number(r.lat), Number(r.lon)], {
+            radius: 5, fillColor: '#e74c3c', color: '#c0392b', weight: 1, fillOpacity: 0.8
+          }).bindPopup(`<b>${r.name || '?'}</b><br>${cat}`);
+          marker.addTo(placesLayer);
+          placeMarkers.push({ marker, cat, id: r.id, lat: r.lat, lon: r.lon });
+        }
       }
+      buildCategoryUI(Object.entries(catCounts).sort((a, b) => b[1] - a[1]));
     }
 
-    buildCategoryUI(Object.entries(catCounts).sort((a, b) => b[1] - a[1]));
     await updateCachedCounts();
     log(`Loaded ${placeMarkers.length.toLocaleString()} places`, 'success');
   } catch (e) {
@@ -251,15 +282,39 @@ async function loadPlaces() {
   }
 }
 
-async function loadBuildingsFromFiles(bbox, files, label) {
-  const fileList = files.map(f => `'${f}'`).join(',');
-  const start = performance.now();
-  await conn.query(`
-    CREATE TABLE buildings AS
-    SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
-    FROM read_parquet([${fileList}], hive_partitioning=false) b
-    WHERE ${bboxFilter(bbox, 'b')}`);
-  console.log(`${label}: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
+async function loadBuildingsFromFiles(bbox, files, total, d) {
+  await conn.query(`CREATE TABLE buildings (id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
+
+  const batchSize = 5;
+  const seenIds = new Set();
+
+  for (let i = 0; i < files.length; i += batchSize) {
+    const batch = files.slice(i, i + batchSize);
+    log(`Loading buildings (${i + batch.length}/${files.length} files, ${total} total)...`);
+
+    const fileList = batch.map(f => `'${f}'`).join(',');
+    await conn.query(`
+      INSERT INTO buildings
+      SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
+      FROM read_parquet([${fileList}], hive_partitioning=false) b
+      WHERE ${bboxFilter(bbox, 'b')}`);
+
+    // Render buildings from this batch that are near places
+    const newRows = (await conn.query(`
+      SELECT DISTINCT b.id, b.geojson FROM buildings b
+      JOIN places p ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
+                   AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
+      WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')}
+    `)).toArray();
+
+    for (const r of newRows) {
+      if (r.geojson && !seenIds.has(r.id)) {
+        seenIds.add(r.id);
+        renderBuilding(r.geojson, r.id);
+      }
+    }
+    updateStats();
+  }
 }
 
 async function getSmartFilteredFiles(dataType, bbox) {
@@ -293,31 +348,28 @@ async function loadBuildings() {
       if (mode === 'smart') {
         log('Getting filtered file list...');
         const { files, total } = await getSmartFilteredFiles('buildings', bbox);
-        log(`Loading buildings (${files.length}/${total} files)...`);
         if (files.length > 0) {
-          await loadBuildingsFromFiles(bbox, files, 'Smart filter');
+          await loadBuildingsFromFiles(bbox, files, total, d);
         } else {
           await conn.query(`CREATE TABLE buildings (id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
         }
       } else {
         const files = await listFiles('buildings', 'building');
-        log(`Loading buildings (${files.length} files)...`);
-        await loadBuildingsFromFiles(bbox, files, 'All files');
+        await loadBuildingsFromFiles(bbox, files, files.length, d);
       }
 
       buildingsBbox = { ...bbox };
     } else {
       log('Querying cached buildings...');
+      const rows = (await conn.query(`
+        SELECT DISTINCT b.id, b.geojson FROM buildings b
+        JOIN places p ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
+                     AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
+        WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')}
+      `)).toArray();
+
+      for (const r of rows) if (r.geojson) renderBuilding(r.geojson, r.id);
     }
-
-    const rows = (await conn.query(`
-      SELECT DISTINCT b.id, b.geojson FROM buildings b
-      JOIN places p ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
-                   AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
-      WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')}
-    `)).toArray();
-
-    for (const r of rows) if (r.geojson) renderBuilding(r.geojson, r.id);
 
     await updateCachedCounts();
     log(`Loaded ${buildingMarkers.length.toLocaleString()} buildings`, 'success');
