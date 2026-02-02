@@ -15,32 +15,44 @@ Browser-based viewer for [Overture Maps](https://overturemaps.org/) data using D
 - File list caching in localStorage for faster subsequent loads
 - URL hash preserves map position
 
-## Development
+## Architecture
+
+- **Frontend**: Static HTML/JS/CSS served by Cloudflare Pages (or nginx locally)
+- **Worker**: Cloudflare Worker handles CORS proxy + spatial index for Parquet files
+- **Data**: Overture Maps GeoParquet files on S3 (queried directly via HTTP range requests)
+
+## Local Development
 
 ```bash
+# Terminal 1: Start the Cloudflare Worker
+cd worker && npx wrangler dev
+
+# Terminal 2: Start the frontend
 docker compose up
 ```
 
-- App: http://localhost
-- S3 proxy: http://localhost:8080
+- Frontend: http://localhost (or http://zarbazan)
+- Worker: http://localhost:8787
 
-## Production Build
+## Production
 
-```bash
-docker compose run --rm app npm run build
-```
+Deployed automatically via GitHub Actions:
+- Frontend → Cloudflare Pages
+- Worker → Cloudflare Workers
 
-Output in `dist/` - serve with any static file server.
+Live at: [maps.marchen.co](https://maps.marchen.co)
+
+## Usage
 
 1. Position the map to your area of interest
 2. Adjust the limit slider
-3. Check "Load buildings near places" if needed
-4. Click "Load Data"
-5. Use category checkboxes to filter places and buildings
+3. Click "Load Places"
+4. Optionally load buildings near places
+5. Use category checkboxes to filter places
 
 ## How it works
 
-- Uses nginx to proxy S3 requests (avoiding CORS issues)
+- Cloudflare Worker proxies S3 requests (CORS) and provides spatial file index
 - DuckDB-WASM with spatial extension queries Parquet files directly
-- Places filtered by bbox, buildings filtered by bbox overlap with places
+- Places filtered by bbox, buildings filtered by spatial join with places
 - Category filtering is client-side for instant response
