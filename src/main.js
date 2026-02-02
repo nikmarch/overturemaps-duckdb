@@ -52,8 +52,16 @@ $('collapseBtn').onclick = () => {
   const body = $('controlsBody');
   const btn = $('collapseBtn');
   body.classList.toggle('collapsed');
-  btn.textContent = body.classList.contains('collapsed') ? '+' : '−';
+  const isCollapsed = body.classList.contains('collapsed');
+  btn.textContent = isCollapsed ? '+' : '−';
+  localStorage.setItem('controlsCollapsed', isCollapsed);
 };
+
+// Restore collapsed state
+if (localStorage.getItem('controlsCollapsed') === 'true') {
+  $('controlsBody').classList.add('collapsed');
+  $('collapseBtn').textContent = '+';
+}
 
 map.on('moveend', () => {
   const c = map.getCenter();
@@ -92,11 +100,6 @@ function log(msg, type = 'loading') {
   $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>`;
   $('status').className = type;
   updateStats();
-
-  if (type === 'loading') {
-    $('controlsBody').classList.remove('collapsed');
-    $('collapseBtn').textContent = '−';
-  }
 }
 
 function getBbox() {
@@ -419,29 +422,24 @@ async function findIntersections() {
 
     log('Finding intersections...');
 
-    // Use ST_Contains for precise matching, with optional distance buffer
-    // First filter by bbox for performance, then use actual geometry
-    const spatialCondition = d > 0
-      ? `ST_DWithin(b.geometry, p.geometry, ${d})`
-      : `ST_Contains(b.geometry, p.geometry)`;
-
-    // Find places that are inside buildings (or within distance)
+    // Green = building actually contains the place (ST_Contains)
+    // Places inside buildings
     const placesWithBuildings = new Set(
       (await conn.query(`
         SELECT DISTINCT p.id FROM places p
-        JOIN buildings b ON b.bbox.xmax >= p.lon - ${d} AND b.bbox.xmin <= p.lon + ${d}
-                       AND b.bbox.ymax >= p.lat - ${d} AND b.bbox.ymin <= p.lat + ${d}
-        WHERE ${pointFilter(bbox, 'p')} AND ${spatialCondition}
+        JOIN buildings b ON b.bbox.xmax >= p.lon AND b.bbox.xmin <= p.lon
+                       AND b.bbox.ymax >= p.lat AND b.bbox.ymin <= p.lat
+        WHERE ${pointFilter(bbox, 'p')} AND ST_Contains(b.geometry, p.geometry)
       `)).toArray().map(r => r.id)
     );
 
-    // Find buildings that contain places (or have places within distance)
+    // Buildings that contain places
     const buildingsWithPlaces = new Set(
       (await conn.query(`
         SELECT DISTINCT b.id FROM buildings b
-        JOIN places p ON b.bbox.xmax >= p.lon - ${d} AND b.bbox.xmin <= p.lon + ${d}
-                     AND b.bbox.ymax >= p.lat - ${d} AND b.bbox.ymin <= p.lat + ${d}
-        WHERE ${pointFilter(bbox, 'p')} AND ${spatialCondition}
+        JOIN places p ON b.bbox.xmax >= p.lon AND b.bbox.xmin <= p.lon
+                     AND b.bbox.ymax >= p.lat AND b.bbox.ymin <= p.lat
+        WHERE ${pointFilter(bbox, 'p')} AND ST_Contains(b.geometry, p.geometry)
       `)).toArray().map(r => r.id)
     );
 
@@ -458,19 +456,19 @@ async function findIntersections() {
       }
     }
 
-    // Only show buildings that intersect with places (green), hide others
-    let intersectingBuildings = 0;
+    // Green = buildings that contain places, blue = nearby but not containing
+    let containingBuildings = 0;
     for (const { layer, id } of buildingMarkers) {
       if (buildingsWithPlaces.has(id)) {
-        layer.setStyle({ fillColor: '#27ae60', color: '#1e8449' }); // green
-        if (!buildingsLayer.hasLayer(layer)) buildingsLayer.addLayer(layer);
-        intersectingBuildings++;
+        layer.setStyle({ fillColor: '#27ae60', color: '#1e8449' }); // green - contains place
+        containingBuildings++;
       } else {
-        buildingsLayer.removeLayer(layer); // hide non-intersecting buildings
+        layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' }); // blue - nearby but not containing
       }
+      if (!buildingsLayer.hasLayer(layer)) buildingsLayer.addLayer(layer);
     }
 
-    log(`${matched} matched, ${unmatched} unmatched | ${intersectingBuildings} buildings shown`, 'success');
+    log(`${matched} places matched | ${containingBuildings} buildings contain places`, 'success');
   } catch (e) {
     log(`Error: ${e.message}`, 'error');
     console.error(e);
