@@ -201,17 +201,23 @@ async function loadPlaces() {
 
   try {
     if (!useCache) {
-      const fileList = await listFiles('places', 'place');
-      log(`Loading places (${fileList.length} files)...`);
-      const files = fileList.map(f => `'${f}'`).join(',');
+      log('Getting filtered file list...');
+      const { files: smartFiles, total } = await getSmartFilteredFiles('places', bbox);
+      log(`Loading places (${smartFiles.length}/${total} files)...`);
+
       await conn.query(`DROP TABLE IF EXISTS places`);
-      await conn.query(`
-        CREATE TABLE places AS
-        SELECT id, names.primary as name, categories.primary as cat,
-               ST_X(geometry) as lon, ST_Y(geometry) as lat, geometry, bbox
-        FROM read_parquet([${files}], hive_partitioning=false)
-        WHERE ${bboxFilter(bbox)}
-        LIMIT ${limit}`);
+      if (smartFiles.length > 0) {
+        const files = smartFiles.map(f => `'${f}'`).join(',');
+        await conn.query(`
+          CREATE TABLE places AS
+          SELECT id, names.primary as name, categories.primary as cat,
+                 ST_X(geometry) as lon, ST_Y(geometry) as lat, geometry, bbox
+          FROM read_parquet([${files}], hive_partitioning=false)
+          WHERE ${bboxFilter(bbox)}
+          LIMIT ${limit}`);
+      } else {
+        await conn.query(`CREATE TABLE places (id VARCHAR, name VARCHAR, cat VARCHAR, lon DOUBLE, lat DOUBLE, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
+      }
       placesBbox = { ...bbox };
     } else {
       log('Querying cached places...');
@@ -254,8 +260,8 @@ async function loadBuildingsFromFiles(bbox, files, label) {
   console.log(`${label}: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
 }
 
-async function getSmartFilteredFiles(bbox) {
-  const url = `${PROXY}/files/buildings?xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
+async function getSmartFilteredFiles(dataType, bbox) {
+  const url = `${PROXY}/files/${dataType}?xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
   const response = await fetch(url);
   const files = await response.json();
   const total = response.headers.get('X-Total-Files') || '?';
@@ -284,7 +290,7 @@ async function loadBuildings() {
 
       if (mode === 'smart') {
         log('Getting filtered file list...');
-        const { files, total } = await getSmartFilteredFiles(bbox);
+        const { files, total } = await getSmartFilteredFiles('buildings', bbox);
         log(`Loading buildings (${files.length}/${total} files)...`);
         if (files.length > 0) {
           await loadBuildingsFromFiles(bbox, files, 'Smart filter');

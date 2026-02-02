@@ -3,9 +3,9 @@ import { parquetMetadataAsync } from 'hyparquet';
 const S3_BASE = 'https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com';
 const RELEASE = '2026-01-21.0';
 
-// Spatial index: file -> {xmin, xmax, ymin, ymax}
-let buildingsIndex = null;
-let indexBuildPromise = null;
+// Spatial indices: file -> {xmin, xmax, ymin, ymax}
+const indices = { buildings: null, places: null };
+const indexPromises = { buildings: null, places: null };
 
 export default {
   async fetch(request) {
@@ -21,21 +21,27 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // GET /files/buildings?xmin=...&xmax=...&ymin=...&ymax=...
-    if (url.pathname === '/files/buildings') {
-      return handleBuildingsRequest(url, corsHeaders);
+    // GET /files/:type?xmin=...&xmax=...&ymin=...&ymax=...
+    const filesMatch = url.pathname.match(/^\/files\/(buildings|places)$/);
+    if (filesMatch) {
+      const type = filesMatch[1];
+      return handleFilesRequest(url, corsHeaders, type);
     }
 
     // GET /index/status
     if (url.pathname === '/index/status') {
-      // Show sample of index for debugging
-      const sample = buildingsIndex ? Object.entries(buildingsIndex).slice(0, 3) : [];
-      return new Response(JSON.stringify({
-        ready: buildingsIndex !== null,
-        building: indexBuildPromise !== null,
-        fileCount: buildingsIndex ? Object.keys(buildingsIndex).length : 0,
-        sample: sample.map(([file, bbox]) => ({ file: file.split('/').pop(), ...bbox })),
-      }), {
+      const status = {};
+      for (const type of ['buildings', 'places']) {
+        const idx = indices[type];
+        const sample = idx ? Object.entries(idx).slice(0, 2) : [];
+        status[type] = {
+          ready: idx !== null,
+          building: indexPromises[type] !== null,
+          fileCount: idx ? Object.keys(idx).length : 0,
+          sample: sample.map(([file, bbox]) => ({ file: file.split('/').pop(), ...bbox })),
+        };
+      }
+      return new Response(JSON.stringify(status), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
@@ -172,10 +178,17 @@ function parseDoubleFromBuffer(buf) {
   return view.getFloat64(0, true); // little-endian
 }
 
-async function buildIndex() {
-  console.log('Building spatial index with hyparquet...');
+// Type mapping: URL type -> Overture theme/type
+const TYPE_MAP = {
+  buildings: { theme: 'buildings', type: 'building' },
+  places: { theme: 'places', type: 'place' },
+};
+
+async function buildIndex(dataType) {
+  const { theme, type } = TYPE_MAP[dataType];
+  console.log(`Building ${dataType} spatial index with hyparquet...`);
   const start = Date.now();
-  const files = await listFiles('buildings', 'building');
+  const files = await listFiles(theme, type);
   const index = {};
 
   // Process in batches
@@ -188,7 +201,7 @@ async function buildIndex() {
         const fileUrl = `${S3_BASE}/${file}`;
         const asyncBuffer = createAsyncBuffer(fileUrl);
         const metadata = await parquetMetadataAsync(asyncBuffer);
-        const debug = i === 0 && idx === 0; // Debug first file only
+        const debug = i === 0 && idx === 0;
         index[file] = extractBboxFromMetadata(metadata, debug);
       } catch (e) {
         console.error(`Error indexing ${file}:`, e.message);
@@ -196,38 +209,38 @@ async function buildIndex() {
       }
     }));
 
-    console.log(`Indexed ${Math.min(i + batchSize, files.length)}/${files.length} files`);
+    console.log(`${dataType}: Indexed ${Math.min(i + batchSize, files.length)}/${files.length} files`);
   }
 
-  console.log(`Index built in ${((Date.now() - start) / 1000).toFixed(1)}s for ${files.length} files`);
+  console.log(`${dataType} index built in ${((Date.now() - start) / 1000).toFixed(1)}s for ${files.length} files`);
   return index;
 }
 
-async function handleBuildingsRequest(url, corsHeaders) {
+async function handleFilesRequest(url, corsHeaders, dataType) {
   const xmin = parseFloat(url.searchParams.get('xmin'));
   const xmax = parseFloat(url.searchParams.get('xmax'));
   const ymin = parseFloat(url.searchParams.get('ymin'));
   const ymax = parseFloat(url.searchParams.get('ymax'));
 
   // Build index if not ready
-  if (!buildingsIndex && !indexBuildPromise) {
-    indexBuildPromise = buildIndex().then(idx => {
-      buildingsIndex = idx;
-      indexBuildPromise = null;
+  if (!indices[dataType] && !indexPromises[dataType]) {
+    indexPromises[dataType] = buildIndex(dataType).then(idx => {
+      indices[dataType] = idx;
+      indexPromises[dataType] = null;
     });
   }
 
-  if (indexBuildPromise) {
-    await indexBuildPromise;
+  if (indexPromises[dataType]) {
+    await indexPromises[dataType];
   }
 
   // Filter files by bbox intersection
-  let files = Object.keys(buildingsIndex);
+  let files = Object.keys(indices[dataType]);
   const totalFiles = files.length;
 
   if (!isNaN(xmin) && !isNaN(xmax) && !isNaN(ymin) && !isNaN(ymax)) {
     files = files.filter(f => {
-      const fb = buildingsIndex[f];
+      const fb = indices[dataType][f];
       return fb.xmax >= xmin && fb.xmin <= xmax && fb.ymax >= ymin && fb.ymin <= ymax;
     });
   }
