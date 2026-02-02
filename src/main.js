@@ -1,8 +1,7 @@
 import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
 
 const $ = id => document.getElementById(id);
-// Use local worker for development: set USE_LOCAL_WORKER=true or access via localhost/zarbazan
-const USE_LOCAL_WORKER = false; // CI sets this to false for production
+const USE_LOCAL_WORKER = false;
 const isLocal = USE_LOCAL_WORKER || ['localhost', 'zarbazan'].includes(location.hostname);
 const PROXY = isLocal ? 'http://localhost:8787' : 'https://overture-s3-proxy.nik-d71.workers.dev';
 const RELEASE = '2026-01-21.0';
@@ -31,17 +30,17 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 placesLayer.addTo(map);
 buildingsLayer.addTo(map);
 
-if (!hasHash && navigator.geolocation) {
-  navigator.geolocation.getCurrentPosition(
-    pos => {
-      console.log('Geolocation:', pos.coords.latitude, pos.coords.longitude);
-      map.setView([pos.coords.latitude, pos.coords.longitude], DEFAULT_ZOOM);
-    },
-    err => console.log('Geolocation error:', err.message)
-  );
-}
 
-$('limitSlider').oninput = () => $('limitValue').textContent = parseInt($('limitSlider').value).toLocaleString();
+let lastLimit = parseInt($('limitSlider').value);
+$('limitSlider').oninput = () => {
+  $('limitValue').textContent = parseInt($('limitSlider').value).toLocaleString();
+  const newLimit = parseInt($('limitSlider').value);
+  if (newLimit !== lastLimit) {
+    placesBbox = null;
+    buildingsBbox = null;
+    lastLimit = newLimit;
+  }
+};
 $('distanceSlider').oninput = () => $('distanceValue').textContent = $('distanceSlider').value + 'm';
 $('catHeader').onclick = () => $('categories').classList.toggle('visible');
 $('loadPlacesBtn').onclick = loadPlaces;
@@ -51,15 +50,21 @@ $('collapseBtn').onclick = () => {
   const body = $('controlsBody');
   const btn = $('collapseBtn');
   body.classList.toggle('collapsed');
-  btn.textContent = body.classList.contains('collapsed') ? '+' : '−';
+  const isCollapsed = body.classList.contains('collapsed');
+  btn.textContent = isCollapsed ? '+' : '−';
+  localStorage.setItem('controlsCollapsed', isCollapsed);
 };
+
+if (localStorage.getItem('controlsCollapsed') === 'true') {
+  $('controlsBody').classList.add('collapsed');
+  $('collapseBtn').textContent = '+';
+}
 
 map.on('moveend', () => {
   const c = map.getCenter();
   history.replaceState(null, '', `#${map.getZoom()}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`);
 });
 
-// Cached table counts
 let cachedPlacesCount = 0;
 let cachedBuildingsCount = 0;
 
@@ -75,30 +80,22 @@ async function updateCachedCounts() {
   } catch (e) { /* ignore */ }
 }
 
-function log(msg, type = 'loading') {
-  const shown = [];
-  if (placeMarkers.length) shown.push(`${placeMarkers.length.toLocaleString()}p`);
-  if (buildingMarkers.length) shown.push(`${buildingMarkers.length.toLocaleString()}b`);
-
+function updateStats() {
   const cached = [];
-  if (cachedPlacesCount) cached.push(`${cachedPlacesCount.toLocaleString()}p`);
-  if (cachedBuildingsCount) cached.push(`${cachedBuildingsCount.toLocaleString()}b`);
+  if (cachedPlacesCount) cached.push(`${cachedPlacesCount.toLocaleString()} places`);
+  if (cachedBuildingsCount) cached.push(`${cachedBuildingsCount.toLocaleString()} buildings`);
+  $('cachedStats').textContent = cached.length ? cached.join(', ') : '-';
 
-  let totalsHtml = '';
-  if (shown.length || cached.length) {
-    const parts = [];
-    if (shown.length) parts.push(`shown: ${shown.join('/')}`);
-    if (cached.length) parts.push(`cached: ${cached.join('/')}`);
-    totalsHtml = `<span class="status-totals">${parts.join(' | ')}</span>`;
-  }
+  const shown = [];
+  if (placeMarkers.length) shown.push(`${placeMarkers.length.toLocaleString()} places`);
+  if (buildingMarkers.length) shown.push(`${buildingMarkers.length.toLocaleString()} buildings`);
+  $('shownStats').textContent = shown.length ? shown.join(', ') : '-';
+}
 
-  $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>${totalsHtml}`;
+function log(msg, type = 'loading') {
+  $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>`;
   $('status').className = type;
-
-  if (type === 'loading') {
-    $('controlsBody').classList.remove('collapsed');
-    $('collapseBtn').textContent = '−';
-  }
+  updateStats();
 }
 
 function getBbox() {
@@ -159,6 +156,7 @@ function filterPlaces() {
     }
   }
   log(`${visible.toLocaleString()} places visible`, 'success');
+  updateStats();
 }
 
 function buildCategoryUI(catCounts) {
@@ -206,44 +204,74 @@ async function loadPlaces() {
     if (!useCache) {
       log('Getting filtered file list...');
       const { files: smartFiles, total } = await getSmartFilteredFiles('places', bbox);
-      log(`Loading places (${smartFiles.length}/${total} files)...`);
 
       await conn.query(`DROP TABLE IF EXISTS places`);
+      await conn.query(`CREATE TABLE places (id VARCHAR, name VARCHAR, cat VARCHAR, lon DOUBLE, lat DOUBLE, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
+
       if (smartFiles.length > 0) {
-        const files = smartFiles.map(f => `'${f}'`).join(',');
-        await conn.query(`
-          CREATE TABLE places AS
-          SELECT id, names.primary as name, categories.primary as cat,
-                 ST_X(geometry) as lon, ST_Y(geometry) as lat, geometry, bbox
-          FROM read_parquet([${files}], hive_partitioning=false)
-          WHERE ${bboxFilter(bbox)}
-          LIMIT ${limit}`);
-      } else {
-        await conn.query(`CREATE TABLE places (id VARCHAR, name VARCHAR, cat VARCHAR, lon DOUBLE, lat DOUBLE, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
+        const batchSize = 2;
+        let totalLoaded = 0;
+        const catCounts = {};
+
+        for (let i = 0; i < smartFiles.length && totalLoaded < limit; i += batchSize) {
+          const batch = smartFiles.slice(i, i + batchSize);
+          const remaining = limit - totalLoaded;
+          log(`Loading places (${i + batch.length}/${smartFiles.length} files, ${total} total)...`);
+
+          const files = batch.map(f => `'${f}'`).join(',');
+          await conn.query(`
+            INSERT INTO places
+            SELECT id, names.primary as name, categories.primary as cat,
+                   ST_X(geometry) as lon, ST_Y(geometry) as lat, geometry, bbox
+            FROM read_parquet([${files}], hive_partitioning=false)
+            WHERE ${bboxFilter(bbox)}
+            LIMIT ${remaining}`);
+
+          const newRows = (await conn.query(`
+            SELECT id, name, cat, lon, lat FROM places
+            WHERE ${pointFilter(bbox)}
+            LIMIT ${limit} OFFSET ${totalLoaded}
+          `)).toArray();
+
+          for (const r of newRows) {
+            const cat = r.cat || '';
+            catCounts[cat] = (catCounts[cat] || 0) + 1;
+            if (r.lat && r.lon) {
+              const marker = L.circleMarker([Number(r.lat), Number(r.lon)], {
+                radius: 5, fillColor: '#e74c3c', color: '#c0392b', weight: 1, fillOpacity: 0.8
+              }).bindPopup(`<b>${r.name || '?'}</b><br>${cat}`);
+              marker.addTo(placesLayer);
+              placeMarkers.push({ marker, cat, id: r.id, lat: r.lat, lon: r.lon });
+            }
+          }
+          totalLoaded += newRows.length;
+          updateStats();
+        }
+
+        buildCategoryUI(Object.entries(catCounts).sort((a, b) => b[1] - a[1]));
       }
       placesBbox = { ...bbox };
     } else {
       log('Querying cached places...');
-    }
+      const rows = (await conn.query(`SELECT id, name, cat, lon, lat FROM places WHERE ${pointFilter(bbox)}`)).toArray();
+      const catCounts = {};
 
-    const rows = (await conn.query(`SELECT id, name, cat, lon, lat FROM places WHERE ${pointFilter(bbox)}`)).toArray();
-    const catCounts = {};
-
-    for (const r of rows) {
-      const cat = r.cat || '';
-      catCounts[cat] = (catCounts[cat] || 0) + 1;
-      if (r.lat && r.lon) {
-        const marker = L.circleMarker([Number(r.lat), Number(r.lon)], {
-          radius: 5, fillColor: '#e74c3c', color: '#c0392b', weight: 1, fillOpacity: 0.8
-        }).bindPopup(`<b>${r.name || '?'}</b><br>${cat}`);
-        marker.addTo(placesLayer);
-        placeMarkers.push({ marker, cat, id: r.id, lat: r.lat, lon: r.lon });
+      for (const r of rows) {
+        const cat = r.cat || '';
+        catCounts[cat] = (catCounts[cat] || 0) + 1;
+        if (r.lat && r.lon) {
+          const marker = L.circleMarker([Number(r.lat), Number(r.lon)], {
+            radius: 5, fillColor: '#e74c3c', color: '#c0392b', weight: 1, fillOpacity: 0.8
+          }).bindPopup(`<b>${r.name || '?'}</b><br>${cat}`);
+          marker.addTo(placesLayer);
+          placeMarkers.push({ marker, cat, id: r.id, lat: r.lat, lon: r.lon });
+        }
       }
+      buildCategoryUI(Object.entries(catCounts).sort((a, b) => b[1] - a[1]));
     }
 
-    buildCategoryUI(Object.entries(catCounts).sort((a, b) => b[1] - a[1]));
     await updateCachedCounts();
-    log(`Loaded ${placeMarkers.length} places`, 'success');
+    log(`Loaded ${placeMarkers.length.toLocaleString()} places`, 'success');
   } catch (e) {
     log(`Error: ${e.message}`, 'error');
     console.error(e);
@@ -252,15 +280,41 @@ async function loadPlaces() {
   }
 }
 
-async function loadBuildingsFromFiles(bbox, files, label) {
-  const fileList = files.map(f => `'${f}'`).join(',');
-  const start = performance.now();
-  await conn.query(`
-    CREATE TABLE buildings AS
-    SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
-    FROM read_parquet([${fileList}], hive_partitioning=false) b
-    WHERE ${bboxFilter(bbox, 'b')}`);
-  console.log(`${label}: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
+async function loadBuildingsFromFiles(bbox, files, total, d) {
+  await conn.query(`CREATE TABLE buildings (id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
+
+  const batchSize = 5;
+  const seenIds = new Set();
+
+  for (let i = 0; i < files.length; i += batchSize) {
+    const batch = files.slice(i, i + batchSize);
+    log(`Loading buildings (${i + batch.length}/${files.length} files, ${total} total)...`);
+
+    const fileList = batch.map(f => `'${f}'`).join(',');
+    await conn.query(`
+      INSERT INTO buildings
+      SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
+      FROM read_parquet([${fileList}], hive_partitioning=false) b
+      WHERE ${bboxFilter(bbox, 'b')}`);
+
+    const spatialCondition = d > 0
+      ? `ST_DWithin(b.geometry, p.geometry, ${d})`
+      : `ST_Contains(b.geometry, p.geometry)`;
+    const newRows = (await conn.query(`
+      SELECT DISTINCT b.id, b.geojson FROM buildings b
+      JOIN places p ON b.bbox.xmax >= p.lon - ${d} AND b.bbox.xmin <= p.lon + ${d}
+                   AND b.bbox.ymax >= p.lat - ${d} AND b.bbox.ymin <= p.lat + ${d}
+      WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')} AND ${spatialCondition}
+    `)).toArray();
+
+    for (const r of newRows) {
+      if (r.geojson && !seenIds.has(r.id)) {
+        seenIds.add(r.id);
+        renderBuilding(r.geojson, r.id);
+      }
+    }
+    updateStats();
+  }
 }
 
 async function getSmartFilteredFiles(dataType, bbox) {
@@ -294,34 +348,34 @@ async function loadBuildings() {
       if (mode === 'smart') {
         log('Getting filtered file list...');
         const { files, total } = await getSmartFilteredFiles('buildings', bbox);
-        log(`Loading buildings (${files.length}/${total} files)...`);
         if (files.length > 0) {
-          await loadBuildingsFromFiles(bbox, files, 'Smart filter');
+          await loadBuildingsFromFiles(bbox, files, total, d);
         } else {
           await conn.query(`CREATE TABLE buildings (id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
         }
       } else {
         const files = await listFiles('buildings', 'building');
-        log(`Loading buildings (${files.length} files)...`);
-        await loadBuildingsFromFiles(bbox, files, 'All files');
+        await loadBuildingsFromFiles(bbox, files, files.length, d);
       }
 
       buildingsBbox = { ...bbox };
     } else {
       log('Querying cached buildings...');
+      const spatialCondition = d > 0
+        ? `ST_DWithin(b.geometry, p.geometry, ${d})`
+        : `ST_Contains(b.geometry, p.geometry)`;
+      const rows = (await conn.query(`
+        SELECT DISTINCT b.id, b.geojson FROM buildings b
+        JOIN places p ON b.bbox.xmax >= p.lon - ${d} AND b.bbox.xmin <= p.lon + ${d}
+                     AND b.bbox.ymax >= p.lat - ${d} AND b.bbox.ymin <= p.lat + ${d}
+        WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')} AND ${spatialCondition}
+      `)).toArray();
+
+      for (const r of rows) if (r.geojson) renderBuilding(r.geojson, r.id);
     }
 
-    const rows = (await conn.query(`
-      SELECT DISTINCT b.id, b.geojson FROM buildings b
-      JOIN places p ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
-                   AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
-      WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')}
-    `)).toArray();
-
-    for (const r of rows) if (r.geojson) renderBuilding(r.geojson, r.id);
-
     await updateCachedCounts();
-    log(`Loaded ${buildingMarkers.length} buildings`, 'success');
+    log(`Loaded ${buildingMarkers.length.toLocaleString()} buildings`, 'success');
   } catch (e) {
     log(`Error: ${e.message}`, 'error');
     console.error(e);
@@ -340,9 +394,11 @@ async function findIntersections() {
   if (!checked) {
     for (const { marker } of placeMarkers) {
       marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' });
+      if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
     }
     for (const { layer } of buildingMarkers) {
       layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' });
+      if (!buildingsLayer.hasLayer(layer)) buildingsLayer.addLayer(layer);
     }
     log(`${placeMarkers.length} places, ${buildingMarkers.length} buildings`, 'success');
     return;
@@ -358,46 +414,49 @@ async function findIntersections() {
 
     log('Finding intersections...');
 
-    // Find places that have nearby buildings
     const placesWithBuildings = new Set(
       (await conn.query(`
         SELECT DISTINCT p.id FROM places p
-        JOIN buildings b ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
-                       AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
-        WHERE ${pointFilter(bbox, 'p')}
+        JOIN buildings b ON b.bbox.xmax >= p.lon AND b.bbox.xmin <= p.lon
+                       AND b.bbox.ymax >= p.lat AND b.bbox.ymin <= p.lat
+        WHERE ${pointFilter(bbox, 'p')} AND ST_Contains(b.geometry, p.geometry)
       `)).toArray().map(r => r.id)
     );
 
-    // Find buildings that have nearby places
     const buildingsWithPlaces = new Set(
       (await conn.query(`
         SELECT DISTINCT b.id FROM buildings b
-        JOIN places p ON b.bbox.xmax >= p.bbox.xmin - ${d} AND b.bbox.xmin <= p.bbox.xmax + ${d}
-                     AND b.bbox.ymax >= p.bbox.ymin - ${d} AND b.bbox.ymin <= p.bbox.ymax + ${d}
-        WHERE ${pointFilter(bbox, 'p')}
+        JOIN places p ON b.bbox.xmax >= p.lon AND b.bbox.xmin <= p.lon
+                     AND b.bbox.ymax >= p.lat AND b.bbox.ymin <= p.lat
+        WHERE ${pointFilter(bbox, 'p')} AND ST_Contains(b.geometry, p.geometry)
       `)).toArray().map(r => r.id)
     );
 
     let matched = 0, unmatched = 0;
     for (const { marker, id } of placeMarkers) {
       if (placesWithBuildings.has(id)) {
-        marker.setStyle({ fillColor: '#27ae60', color: '#1e8449' }); // green
+        marker.setStyle({ fillColor: '#27ae60', color: '#1e8449' });
+        if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
         matched++;
       } else {
-        marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' }); // red
+        marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' });
+        if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
         unmatched++;
       }
     }
 
+    let containingBuildings = 0;
     for (const { layer, id } of buildingMarkers) {
       if (buildingsWithPlaces.has(id)) {
-        layer.setStyle({ fillColor: '#27ae60', color: '#1e8449' }); // green
+        layer.setStyle({ fillColor: '#27ae60', color: '#1e8449' });
+        containingBuildings++;
       } else {
-        layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' }); // blue
+        layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' });
       }
+      if (!buildingsLayer.hasLayer(layer)) buildingsLayer.addLayer(layer);
     }
 
-    log(`${matched} matched, ${unmatched} unmatched places`, 'success');
+    log(`${matched} places matched | ${containingBuildings} buildings contain places`, 'success');
   } catch (e) {
     log(`Error: ${e.message}`, 'error');
     console.error(e);
