@@ -31,10 +31,10 @@ jobs:
         run: npx wrangler deploy
         working-directory: worker
 
-      - name: Set worker URL in frontend
+      - name: Ensure production config
         run: |
-          # Remove localhost fallback for production
-          sed -i "s|location.hostname === 'localhost' || location.hostname === 'zarbazan'|false|" src/main.js
+          # Ensure USE_LOCAL_WORKER is false for production builds
+          grep -q "USE_LOCAL_WORKER = false" src/main.js || sed -i 's/USE_LOCAL_WORKER = true/USE_LOCAL_WORKER = false/' src/main.js
 
       - name: Create Pages project if needed
         run: npx wrangler pages project create overture-maps --production-branch=master 2>/dev/null || true

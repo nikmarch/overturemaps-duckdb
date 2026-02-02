@@ -1,10 +1,10 @@
 import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
 
 const $ = id => document.getElementById(id);
-// Use local worker for development (wrangler dev --port 8787)
-const PROXY = location.hostname === 'localhost' || location.hostname === 'zarbazan'
-  ? 'http://localhost:8787'
-  : 'https://overture-s3-proxy.nik-d71.workers.dev';
+// Use local worker for development: set USE_LOCAL_WORKER=true or access via localhost/zarbazan
+const USE_LOCAL_WORKER = false; // CI sets this to false for production
+const isLocal = USE_LOCAL_WORKER || ['localhost', 'zarbazan'].includes(location.hostname);
+const PROXY = isLocal ? 'http://localhost:8787' : 'https://overture-s3-proxy.nik-d71.workers.dev';
 const RELEASE = '2026-01-21.0';
 const CACHE_KEY = `overture_files_${RELEASE}_${location.origin}`;
 
