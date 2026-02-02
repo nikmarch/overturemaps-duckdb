@@ -3,6 +3,8 @@ name: Deploy to Cloudflare
 on:
   push:
     branches: [main, master]
+  pull_request:
+    branches: [main, master]
   workflow_dispatch:
 
 env:
@@ -21,15 +23,26 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install worker dependencies
+        run: npm install
+        working-directory: worker
+
       - name: Deploy Worker
         run: npx wrangler deploy
         working-directory: worker
 
-      - name: Set worker URL
-        run: sed -i "s/YOUR_SUBDOMAIN/${{ env.CLOUDFLARE_SUBDOMAIN }}/" src/main.js
+      - name: Set worker URL in frontend
+        run: |
+          # Remove localhost fallback for production
+          sed -i "s|location.hostname === 'localhost' || location.hostname === 'zarbazan'|false|" src/main.js
 
       - name: Create Pages project if needed
         run: npx wrangler pages project create overture-maps --production-branch=master 2>/dev/null || true
 
-      - name: Deploy Pages
+      - name: Deploy Pages (production)
+        if: github.event_name == 'push'
         run: npx wrangler pages deploy src --project-name=overture-maps --commit-dirty=true
+
+      - name: Deploy Pages (preview)
+        if: github.event_name == 'pull_request'
+        run: npx wrangler pages deploy src --project-name=overture-maps --commit-dirty=true --branch=${{ github.head_ref }}
