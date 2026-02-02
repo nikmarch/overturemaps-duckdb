@@ -24,15 +24,13 @@ Browser-based viewer for [Overture Maps](https://overturemaps.org/) data using D
 ## Local Development
 
 ```bash
-# Terminal 1: Start the Cloudflare Worker
-cd worker && npx wrangler dev
-
-# Terminal 2: Start the frontend
 docker compose up
 ```
 
-- Frontend: http://localhost (or http://zarbazan)
-- Worker: http://localhost:8787
+- Frontend: http://zarbazan (nginx on port 80)
+- Worker: http://localhost:8787 (wrangler dev)
+
+Both services start together - no need for multiple terminals.
 
 ## Production
 
