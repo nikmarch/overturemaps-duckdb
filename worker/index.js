@@ -33,6 +33,18 @@ export default {
       return stub.fetch(request);
     }
 
+    // GET /index/clear - clear cached indices
+    if (url.pathname === '/index/clear') {
+      for (const type of ['buildings', 'places']) {
+        const id = env.SPATIAL_INDEX.idFromName(type);
+        const stub = env.SPATIAL_INDEX.get(id);
+        await stub.fetch(new Request('http://internal/clear'));
+      }
+      return new Response(JSON.stringify({ cleared: true }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
     // GET /index/status
     if (url.pathname === '/index/status') {
       const status = {};
@@ -105,6 +117,15 @@ export class SpatialIndex {
 
   async fetch(request) {
     const url = new URL(request.url);
+
+    // Internal clear request
+    if (url.pathname === '/clear') {
+      this.index = null;
+      await this.state.storage.delete('index');
+      return new Response(JSON.stringify({ cleared: true }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
 
     // Internal status request
     if (url.pathname === '/status') {
