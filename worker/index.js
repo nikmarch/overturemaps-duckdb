@@ -192,7 +192,7 @@ export class SpatialIndex {
       await Promise.all(batch.map(async (file, idx) => {
         try {
           const fileUrl = `${S3_BASE}/${file}`;
-          const asyncBuffer = createAsyncBuffer(fileUrl);
+          const asyncBuffer = await createAsyncBuffer(fileUrl);
           const metadata = await parquetMetadataAsync(asyncBuffer);
           const debug = i === 0 && idx === 0;
           index[file] = extractBboxFromMetadata(metadata, debug);
@@ -227,17 +227,12 @@ async function listFiles(theme, type) {
   return files;
 }
 
-function createAsyncBuffer(url) {
-  let fileSize = null;
+async function createAsyncBuffer(url) {
+  const res = await fetch(url, { method: 'HEAD' });
+  const fileSize = parseInt(res.headers.get('Content-Length'));
 
   return {
-    async byteLength() {
-      if (fileSize === null) {
-        const res = await fetch(url, { method: 'HEAD' });
-        fileSize = parseInt(res.headers.get('Content-Length'));
-      }
-      return fileSize;
-    },
+    byteLength: fileSize,
     async slice(start, end) {
       const res = await fetch(url, {
         headers: { Range: `bytes=${start}-${end - 1}` }
