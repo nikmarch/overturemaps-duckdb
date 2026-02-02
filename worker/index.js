@@ -13,7 +13,7 @@ const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
   'Access-Control-Allow-Headers': '*',
-  'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
+  'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, X-Total-Files, X-Filtered-Files',
 };
 
 export default {
