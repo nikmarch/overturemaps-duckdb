@@ -10,8 +10,7 @@ services:
       - worker
 
   worker:
-    image: node:20-slim
-    working_dir: /app
+    build: ./worker
     ports:
       - "8787:8787"
     volumes:
