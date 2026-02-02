@@ -41,7 +41,17 @@ if (!hasHash && navigator.geolocation) {
   );
 }
 
-$('limitSlider').oninput = () => $('limitValue').textContent = parseInt($('limitSlider').value).toLocaleString();
+let lastLimit = parseInt($('limitSlider').value);
+$('limitSlider').oninput = () => {
+  $('limitValue').textContent = parseInt($('limitSlider').value).toLocaleString();
+  const newLimit = parseInt($('limitSlider').value);
+  if (newLimit !== lastLimit) {
+    // Reset cache when limit changes
+    placesBbox = null;
+    buildingsBbox = null;
+    lastLimit = newLimit;
+  }
+};
 $('distanceSlider').oninput = () => $('distanceValue').textContent = $('distanceSlider').value + 'm';
 $('catHeader').onclick = () => $('categories').classList.toggle('visible');
 $('loadPlacesBtn').onclick = loadPlaces;
