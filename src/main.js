@@ -53,15 +53,42 @@ map.on('moveend', () => {
   history.replaceState(null, '', `#${map.getZoom()}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`);
 });
 
+// Cached table counts
+let cachedPlacesCount = 0;
+let cachedBuildingsCount = 0;
+
+async function updateCachedCounts() {
+  try {
+    const tables = (await conn.query(`SHOW TABLES`)).toArray().map(t => t.name);
+    if (tables.includes('places')) {
+      cachedPlacesCount = Number((await conn.query(`SELECT COUNT(*) as c FROM places`)).toArray()[0].c);
+    }
+    if (tables.includes('buildings')) {
+      cachedBuildingsCount = Number((await conn.query(`SELECT COUNT(*) as c FROM buildings`)).toArray()[0].c);
+    }
+  } catch (e) { /* ignore */ }
+}
+
 function log(msg, type = 'loading') {
-  const totals = [];
-  if (placeMarkers.length) totals.push(`${placeMarkers.length.toLocaleString()} places`);
-  if (buildingMarkers.length) totals.push(`${buildingMarkers.length.toLocaleString()} buildings`);
-  const totalsHtml = totals.length ? `<span class="status-totals">${totals.join(' | ')}</span>` : '';
+  const shown = [];
+  if (placeMarkers.length) shown.push(`${placeMarkers.length.toLocaleString()}p`);
+  if (buildingMarkers.length) shown.push(`${buildingMarkers.length.toLocaleString()}b`);
+
+  const cached = [];
+  if (cachedPlacesCount) cached.push(`${cachedPlacesCount.toLocaleString()}p`);
+  if (cachedBuildingsCount) cached.push(`${cachedBuildingsCount.toLocaleString()}b`);
+
+  let totalsHtml = '';
+  if (shown.length || cached.length) {
+    const parts = [];
+    if (shown.length) parts.push(`shown: ${shown.join('/')}`);
+    if (cached.length) parts.push(`cached: ${cached.join('/')}`);
+    totalsHtml = `<span class="status-totals">${parts.join(' | ')}</span>`;
+  }
+
   $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>${totalsHtml}`;
   $('status').className = type;
 
-  // Auto-expand controls when loading
   if (type === 'loading') {
     $('controlsBody').classList.remove('collapsed');
     $('collapseBtn').textContent = '−';
@@ -104,68 +131,6 @@ async function listFiles(theme, type) {
   fileCache[key] = files;
   localStorage.setItem(CACHE_KEY, JSON.stringify(fileCache));
   return files;
-}
-
-// Build spatial index from parquet file metadata using DuckDB
-const fileIndex = {}; // file -> {xmin, xmax, ymin, ymax}
-let indexBuilding = false;
-
-async function buildFileIndex(files) {
-  if (indexBuilding) return;
-  indexBuilding = true;
-
-  try {
-    const unindexed = files.filter(f => !fileIndex[f]);
-    if (unindexed.length === 0) return;
-
-    log(`Building index (${unindexed.length} files)...`);
-    const batchSize = 5;
-
-    for (let i = 0; i < unindexed.length; i += batchSize) {
-      const batch = unindexed.slice(i, i + batchSize);
-      const fileList = batch.map(f => `'${f}'`).join(',');
-
-      try {
-        // Query parquet metadata for bbox column statistics
-        const result = await conn.query(`
-          SELECT file_name,
-                 MIN(CAST(stats_min AS DOUBLE)) FILTER (WHERE path_in_schema LIKE '%bbox%xmin%') as xmin,
-                 MAX(CAST(stats_max AS DOUBLE)) FILTER (WHERE path_in_schema LIKE '%bbox%xmax%') as xmax,
-                 MIN(CAST(stats_min AS DOUBLE)) FILTER (WHERE path_in_schema LIKE '%bbox%ymin%') as ymin,
-                 MAX(CAST(stats_max AS DOUBLE)) FILTER (WHERE path_in_schema LIKE '%bbox%ymax%') as ymax
-          FROM parquet_metadata([${fileList}])
-          GROUP BY file_name
-        `);
-
-        for (const row of result.toArray()) {
-          if (row.xmin != null && row.xmax != null && row.ymin != null && row.ymax != null) {
-            fileIndex[row.file_name] = {
-              xmin: Number(row.xmin), xmax: Number(row.xmax),
-              ymin: Number(row.ymin), ymax: Number(row.ymax)
-            };
-          } else {
-            fileIndex[row.file_name] = { xmin: -180, xmax: 180, ymin: -90, ymax: 90 };
-          }
-        }
-      } catch (e) {
-        console.error('Index batch error:', e.message);
-        batch.forEach(f => fileIndex[f] = { xmin: -180, xmax: 180, ymin: -90, ymax: 90 });
-      }
-
-      log(`Building index (${Math.min(i + batchSize, unindexed.length)}/${unindexed.length})...`);
-    }
-  } finally {
-    indexBuilding = false;
-  }
-}
-
-function filterFilesByBbox(files, bbox) {
-  return files.filter(f => {
-    const fb = fileIndex[f];
-    if (!fb) return true; // include if not indexed
-    return fb.xmax >= bbox.xmin && fb.xmin <= bbox.xmax &&
-           fb.ymax >= bbox.ymin && fb.ymin <= bbox.ymax;
-  });
 }
 
 function renderBuilding(geojson, id) {
@@ -265,7 +230,8 @@ async function loadPlaces() {
     }
 
     buildCategoryUI(Object.entries(catCounts).sort((a, b) => b[1] - a[1]));
-    log(`${placeMarkers.length} places ${useCache ? 'cached' : 'loaded'}`, 'success');
+    await updateCachedCounts();
+    log(`Loaded ${placeMarkers.length} places`, 'success');
   } catch (e) {
     log(`Error: ${e.message}`, 'error');
     console.error(e);
@@ -285,36 +251,10 @@ async function loadBuildingsAllFiles(bbox, files) {
   console.log(`All files: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length} files`);
 }
 
-async function loadBuildingsFiltered(bbox, allFiles) {
-  const start = performance.now();
-
-  // Build index if needed
-  await buildFileIndex(allFiles);
-
-  // Filter files by bbox using local index
-  const files = filterFilesByBbox(allFiles, bbox);
-  log(`Loading buildings (${files.length}/${allFiles.length} files)...`);
-
-  if (files.length === 0) {
-    // Create empty table
-    await conn.query(`CREATE TABLE buildings (id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
-    return;
-  }
-
-  const fileList = files.map(f => `'${f}'`).join(',');
-  await conn.query(`
-    CREATE TABLE buildings AS
-    SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
-    FROM read_parquet([${fileList}], hive_partitioning=false) b
-    WHERE ${bboxFilter(bbox, 'b')}`);
-  console.log(`Filtered: ${((performance.now() - start) / 1000).toFixed(1)}s, ${files.length}/${allFiles.length} files`);
-}
-
 async function loadBuildings() {
   const bbox = getBbox();
   const d = parseInt($('distanceSlider').value) / 111000;
   const useCache = bboxContains(buildingsBbox, bbox);
-  const mode = document.querySelector('input[name="loadMode"]:checked').value;
 
   buildingsLayer.clearLayers();
   buildingMarkers = [];
@@ -329,15 +269,9 @@ async function loadBuildings() {
 
     if (!useCache) {
       const files = await listFiles('buildings', 'building');
-      log(`Loading buildings (${files.length} files, ${mode})...`);
+      log(`Loading buildings (${files.length} files)...`);
       await conn.query(`DROP TABLE IF EXISTS buildings`);
-
-      if (mode === 'proxy') {
-        await loadBuildingsFiltered(bbox, files);
-      } else {
-        await loadBuildingsAllFiles(bbox, files);
-      }
-
+      await loadBuildingsAllFiles(bbox, files);
       buildingsBbox = { ...bbox };
     } else {
       log('Querying cached buildings...');
@@ -352,7 +286,8 @@ async function loadBuildings() {
 
     for (const r of rows) if (r.geojson) renderBuilding(r.geojson, r.id);
 
-    log(`${buildingMarkers.length} buildings ${useCache ? 'cached' : 'loaded'}`, 'success');
+    await updateCachedCounts();
+    log(`Loaded ${buildingMarkers.length} buildings`, 'success');
   } catch (e) {
     log(`Error: ${e.message}`, 'error');
     console.error(e);
