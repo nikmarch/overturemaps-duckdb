@@ -1,18 +1,91 @@
 import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
 
 const $ = id => document.getElementById(id);
-const PROXY = '/api'; // Same origin - nginx proxies to worker locally, Cloudflare Functions in production
-const RELEASE = '2026-01-21.0';
-const CACHE_KEY = `overture_files_${RELEASE}_${location.origin}`;
+const PROXY = '/api';
+
+const THEME_COLORS = {
+  places:         { fill: '#e74c3c', stroke: '#c0392b' },
+  buildings:      { fill: '#3388ff', stroke: '#2266cc' },
+  transportation: { fill: '#f39c12', stroke: '#d68910' },
+  base:           { fill: '#27ae60', stroke: '#1e8449' },
+  addresses:      { fill: '#8e44ad', stroke: '#6c3483' },
+  divisions:      { fill: '#2c3e50', stroke: '#1a252f' },
+};
+const DEFAULT_COLOR = { fill: '#95a5a6', stroke: '#7f8c8d' };
+
+// Per-type fields to extract for popups. Each entry: { sql: 'SQL expr', label: 'Display label' }
+// These are tried in order; missing columns are skipped at runtime
+const THEME_FIELDS = {
+  'places/place': [
+    { col: 'categories', sql: 'categories.primary', label: 'Category' },
+    { col: 'confidence', sql: 'ROUND(confidence, 2)', label: 'Confidence' },
+    { col: 'websites', sql: 'websites[1]', label: 'Website' },
+    { col: 'phones', sql: 'phones[1]', label: 'Phone' },
+  ],
+  'buildings/building': [
+    { col: 'subtype', sql: 'subtype', label: 'Subtype' },
+    { col: 'class', sql: 'class', label: 'Class' },
+    { col: 'height', sql: 'ROUND(height, 1)', label: 'Height' },
+    { col: 'num_floors', sql: 'num_floors', label: 'Floors' },
+  ],
+  'buildings/building_part': [
+    { col: 'height', sql: 'ROUND(height, 1)', label: 'Height' },
+    { col: 'num_floors', sql: 'num_floors', label: 'Floors' },
+  ],
+  'addresses/address': [
+    { col: 'number', sql: 'number', label: 'Number' },
+    { col: 'street', sql: 'street', label: 'Street' },
+    { col: 'postcode', sql: 'postcode', label: 'Postcode' },
+    { col: 'country', sql: 'country', label: 'Country' },
+  ],
+  'transportation/segment': [
+    { col: 'subtype', sql: 'subtype', label: 'Subtype' },
+    { col: 'class', sql: 'class', label: 'Class' },
+    { col: 'subclass', sql: 'subclass', label: 'Subclass' },
+  ],
+  'base/infrastructure': [
+    { col: 'subtype', sql: 'subtype', label: 'Subtype' },
+    { col: 'class', sql: 'class', label: 'Class' },
+  ],
+  'base/land': [
+    { col: 'subtype', sql: 'subtype', label: 'Subtype' },
+    { col: 'class', sql: 'class', label: 'Class' },
+    { col: 'elevation', sql: 'elevation', label: 'Elevation' },
+  ],
+  'base/land_cover': [
+    { col: 'subtype', sql: 'subtype', label: 'Subtype' },
+  ],
+  'base/land_use': [
+    { col: 'subtype', sql: 'subtype', label: 'Subtype' },
+    { col: 'class', sql: 'class', label: 'Class' },
+  ],
+  'base/water': [
+    { col: 'subtype', sql: 'subtype', label: 'Subtype' },
+    { col: 'class', sql: 'class', label: 'Class' },
+    { col: 'is_salt', sql: 'is_salt', label: 'Salt' },
+    { col: 'is_intermittent', sql: 'is_intermittent', label: 'Intermittent' },
+  ],
+  'base/bathymetry': [
+    { col: 'depth', sql: 'depth', label: 'Depth' },
+  ],
+  'divisions/division': [
+    { col: 'subtype', sql: 'subtype', label: 'Subtype' },
+    { col: 'country', sql: 'country', label: 'Country' },
+    { col: 'population', sql: 'population', label: 'Population' },
+  ],
+  'divisions/division_area': [
+    { col: 'subtype', sql: 'subtype', label: 'Subtype' },
+    { col: 'country', sql: 'country', label: 'Country' },
+  ],
+  'divisions/division_boundary': [
+    { col: 'subtype', sql: 'subtype', label: 'Subtype' },
+    { col: 'class', sql: 'class', label: 'Class' },
+  ],
+};
 
 let conn = null;
-let placeMarkers = [];
-let buildingMarkers = [];
-let placesBbox = null;
-let buildingsBbox = null;
-const placesLayer = L.layerGroup();
-const buildingsLayer = L.layerGroup();
-const fileCache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}');
+let currentRelease = null;
+const themeState = {};
 
 const DEFAULT_VIEW = [34.05, -118.25];
 const DEFAULT_ZOOM = 14;
@@ -25,25 +98,7 @@ const map = L.map('map').setView(
   hasHash && !isNaN(z) ? z : DEFAULT_ZOOM
 );
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-placesLayer.addTo(map);
-buildingsLayer.addTo(map);
 
-
-let lastLimit = parseInt($('limitSlider').value);
-$('limitSlider').oninput = () => {
-  $('limitValue').textContent = parseInt($('limitSlider').value).toLocaleString();
-  const newLimit = parseInt($('limitSlider').value);
-  if (newLimit !== lastLimit) {
-    placesBbox = null;
-    buildingsBbox = null;
-    lastLimit = newLimit;
-  }
-};
-$('distanceSlider').oninput = () => $('distanceValue').textContent = $('distanceSlider').value + 'm';
-$('catHeader').onclick = () => $('categories').classList.toggle('visible');
-$('loadPlacesBtn').onclick = loadPlaces;
-$('loadBuildingsBtn').onclick = loadBuildings;
-$('intersectCheck').onchange = findIntersections;
 $('collapseBtn').onclick = () => {
   const body = $('controlsBody');
   const btn = $('collapseBtn');
@@ -63,30 +118,18 @@ map.on('moveend', () => {
   history.replaceState(null, '', `#${map.getZoom()}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`);
 });
 
-let cachedPlacesCount = 0;
-let cachedBuildingsCount = 0;
-
-async function updateCachedCounts() {
-  try {
-    const tables = (await conn.query(`SHOW TABLES`)).toArray().map(t => t.name);
-    if (tables.includes('places')) {
-      cachedPlacesCount = Number((await conn.query(`SELECT COUNT(*) as c FROM places`)).toArray()[0].c);
-    }
-    if (tables.includes('buildings')) {
-      cachedBuildingsCount = Number((await conn.query(`SELECT COUNT(*) as c FROM buildings`)).toArray()[0].c);
-    }
-  } catch (e) { /* ignore */ }
+function getThemeColor(theme) {
+  return THEME_COLORS[theme] || DEFAULT_COLOR;
 }
 
 function updateStats() {
-  const cached = [];
-  if (cachedPlacesCount) cached.push(`${cachedPlacesCount.toLocaleString()} places`);
-  if (cachedBuildingsCount) cached.push(`${cachedBuildingsCount.toLocaleString()} buildings`);
-  $('cachedStats').textContent = cached.length ? cached.join(', ') : '-';
-
   const shown = [];
-  if (placeMarkers.length) shown.push(`${placeMarkers.length.toLocaleString()} places`);
-  if (buildingMarkers.length) shown.push(`${buildingMarkers.length.toLocaleString()} buildings`);
+  for (const [key, state] of Object.entries(themeState)) {
+    if (state.markers.length > 0) {
+      const type = key.split('/')[1];
+      shown.push(`${state.markers.length.toLocaleString()} ${type}`);
+    }
+  }
   $('shownStats').textContent = shown.length ? shown.join(', ') : '-';
 }
 
@@ -106,358 +149,286 @@ function bboxContains(outer, inner) {
     outer.ymin <= inner.ymin && outer.ymax >= inner.ymax;
 }
 
-function bboxFilter(bbox, alias = '') {
-  const p = alias ? alias + '.' : '';
-  return `${p}bbox.xmin >= ${bbox.xmin} AND ${p}bbox.xmax <= ${bbox.xmax} AND ${p}bbox.ymin >= ${bbox.ymin} AND ${p}bbox.ymax <= ${bbox.ymax}`;
+function bboxFilter(bbox) {
+  return `bbox.xmax >= ${bbox.xmin} AND bbox.xmin <= ${bbox.xmax} AND bbox.ymax >= ${bbox.ymin} AND bbox.ymin <= ${bbox.ymax}`;
 }
 
-function pointFilter(bbox, alias = '') {
-  const p = alias ? alias + '.' : '';
-  return `${p}lon >= ${bbox.xmin} AND ${p}lon <= ${bbox.xmax} AND ${p}lat >= ${bbox.ymin} AND ${p}lat <= ${bbox.ymax}`;
-}
-
-async function listFiles(theme, type) {
-  const key = `${theme}/${type}`;
-  if (fileCache[key]) return fileCache[key];
-
-  let files = [], marker = '';
-  while (true) {
-    const url = `${PROXY}/?prefix=release/${RELEASE}/theme=${theme}/type=${type}/&max-keys=1000${marker ? '&marker=' + marker : ''}`;
-    const xml = new DOMParser().parseFromString(await (await fetch(url)).text(), 'text/xml');
-    const keys = [...xml.querySelectorAll('Key')].map(k => k.textContent);
-    files.push(...keys.map(k => `${PROXY}/${k}`));
-    if (xml.querySelector('IsTruncated')?.textContent !== 'true') break;
-    marker = encodeURIComponent(keys[keys.length - 1]);
+async function loadReleases() {
+  log('Loading releases...');
+  const res = await fetch(`${PROXY}/releases`);
+  const releases = await res.json();
+  const select = $('releaseSelect');
+  select.innerHTML = '';
+  for (const r of releases) {
+    const opt = document.createElement('option');
+    opt.value = r;
+    opt.textContent = r;
+    select.appendChild(opt);
   }
-  fileCache[key] = files;
-  localStorage.setItem(CACHE_KEY, JSON.stringify(fileCache));
-  return files;
-}
-
-function renderBuilding(geojson, id) {
-  const layer = L.geoJSON(JSON.parse(geojson), {
-    style: { fillColor: '#3388ff', color: '#2266cc', weight: 1, fillOpacity: 0.5 }
-  });
-  layer.addTo(buildingsLayer);
-  buildingMarkers.push({ layer, id, geojson });
-}
-
-function filterPlaces() {
-  const checked = new Set([...$('categories').querySelectorAll('input[data-cat]:checked')].map(cb => cb.dataset.cat));
-  let visible = 0;
-  for (const { marker, cat } of placeMarkers) {
-    if (checked.has(cat)) {
-      if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
-      visible++;
-    } else {
-      placesLayer.removeLayer(marker);
-    }
+  select.disabled = false;
+  select.onchange = () => onReleaseChange(select.value);
+  if (releases.length > 0) {
+    select.value = releases[0];
+    await onReleaseChange(releases[0]);
   }
-  log(`${visible.toLocaleString()} places visible`, 'success');
-  updateStats();
 }
 
-function buildCategoryUI(catCounts) {
-  const container = $('categories');
+async function onReleaseChange(release) {
+  currentRelease = release;
+
+  // Clear all existing theme layers
+  for (const key of Object.keys(themeState)) {
+    themeState[key].layer.clearLayers();
+    map.removeLayer(themeState[key].layer);
+    delete themeState[key];
+  }
+
+  log('Loading themes...');
+  const res = await fetch(`${PROXY}/themes?release=${release}`);
+  const themes = await res.json();
+  buildThemeUI(themes);
+  log('Ready', 'success');
+}
+
+function buildThemeUI(themes) {
+  const container = $('themeList');
   container.innerHTML = '';
 
-  const btns = document.createElement('div');
-  btns.className = 'cat-buttons';
-  btns.innerHTML = `<button type="button">All</button><button type="button">None</button>`;
-  btns.children[0].onclick = () => { container.querySelectorAll('input').forEach(c => c.checked = true); filterPlaces(); };
-  btns.children[1].onclick = () => { container.querySelectorAll('input').forEach(c => c.checked = false); filterPlaces(); };
-  container.appendChild(btns);
+  for (const { theme, type } of themes) {
+    const key = `${theme}/${type}`;
+    const color = getThemeColor(theme);
 
-  for (const [cat, cnt] of catCounts) {
+    const layer = L.layerGroup();
+    layer.addTo(map);
+    themeState[key] = { layer, markers: [], bbox: null, limit: 33000, enabled: false };
+
+    const row = document.createElement('div');
+    row.className = 'theme-row';
+    row.dataset.key = key;
+
     const label = document.createElement('label');
-    const input = document.createElement('input');
-    input.type = 'checkbox';
-    input.checked = true;
-    input.dataset.cat = cat;
-    input.onchange = filterPlaces;
-    label.appendChild(input);
-    label.append(` ${cat || 'uncategorized'} `);
-    const span = document.createElement('span');
-    span.className = 'cat-count';
-    span.textContent = `(${cnt})`;
-    label.appendChild(span);
-    container.appendChild(label);
-  }
+    const dot = document.createElement('span');
+    dot.className = 'theme-dot';
+    dot.style.background = color.fill;
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.dataset.key = key;
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'theme-name';
+    nameSpan.textContent = type;
+    nameSpan.title = `${theme}/${type}`;
+    label.appendChild(dot);
+    label.appendChild(checkbox);
+    label.appendChild(nameSpan);
 
-  $('catCount').textContent = `(${catCounts.length})`;
-  $('catSection').style.display = 'block';
-  container.classList.add('visible');
+    const meta = document.createElement('span');
+    meta.className = 'theme-meta';
+    meta.dataset.key = key;
+
+    const limitInput = document.createElement('input');
+    limitInput.type = 'number';
+    limitInput.className = 'theme-limit';
+    limitInput.value = '33000';
+    limitInput.min = '100';
+    limitInput.max = '1000000';
+    limitInput.step = '1000';
+    limitInput.dataset.key = key;
+
+    row.appendChild(label);
+    row.appendChild(meta);
+    row.appendChild(limitInput);
+    container.appendChild(row);
+
+    checkbox.onchange = () => onThemeToggle(key, checkbox.checked);
+    limitInput.onchange = () => {
+      themeState[key].limit = parseInt(limitInput.value) || 33000;
+      themeState[key].bbox = null;
+    };
+  }
 }
 
-async function loadPlaces() {
-  const bbox = getBbox();
-  const limit = parseInt($('limitSlider').value);
-  const useCache = bboxContains(placesBbox, bbox);
+async function onThemeToggle(key, enabled) {
+  themeState[key].enabled = enabled;
+  if (enabled) {
+    await loadTheme(key);
+  } else {
+    themeState[key].layer.clearLayers();
+    themeState[key].markers = [];
+    updateStats();
+    log('Ready', 'success');
+  }
+}
 
-  placesLayer.clearLayers();
-  placeMarkers = [];
-  $('loadPlacesBtn').disabled = true;
+async function getFieldsForTable(tableName, key) {
+  const cols = (await conn.query(`SELECT column_name FROM information_schema.columns WHERE table_name='${tableName}'`)).toArray();
+  const colNames = new Set(cols.map(c => c.column_name));
+
+  // Name expression
+  let nameExpr = 'NULL';
+  if (colNames.has('names')) nameExpr = 'names.primary';
+  else if (colNames.has('name')) nameExpr = 'name';
+
+  // Extra fields from schema map, filtered to columns that exist
+  const defs = THEME_FIELDS[key] || [];
+  const extraFields = defs.filter(f => colNames.has(f.col));
+
+  const selectParts = [
+    'id',
+    `COALESCE(CAST(${nameExpr} AS VARCHAR), '') as display_name`,
+    'geom_type', 'geojson', 'centroid_lon', 'centroid_lat',
+    ...extraFields.map((f, i) => `CAST(${f.sql} AS VARCHAR) as _f${i}`),
+  ];
+
+  return { selectParts, extraFields };
+}
+
+async function loadTheme(key) {
+  const [theme, type] = key.split('/');
+  const state = themeState[key];
+  const bbox = getBbox();
+  const limit = state.limit;
+  const useCache = bboxContains(state.bbox, bbox);
+  const color = getThemeColor(theme);
+  const tableName = `${theme}_${type}`;
+
+  const row = document.querySelector(`.theme-row[data-key="${key}"]`);
+  if (row) row.classList.add('loading');
+
+  state.layer.clearLayers();
+  state.markers = [];
 
   try {
     if (!useCache) {
-      log('Getting filtered file list...');
-      const { files: smartFiles, total } = await getSmartFilteredFiles('places', bbox);
+      log(`Loading ${type}...`);
 
-      await conn.query(`DROP TABLE IF EXISTS places`);
-      await conn.query(`CREATE TABLE places (id VARCHAR, name VARCHAR, cat VARCHAR, lon DOUBLE, lat DOUBLE, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
+      const filesUrl = `${PROXY}/files?release=${currentRelease}&theme=${theme}&type=${type}&xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
+      const filesRes = await fetch(filesUrl);
+      const fileKeys = await filesRes.json();
+      const total = filesRes.headers.get('X-Total-Files') || '?';
+      const filtered = filesRes.headers.get('X-Filtered-Files') || '?';
+      const files = fileKeys.map(k => `${location.origin}/${k}`);
 
-      if (smartFiles.length > 0) {
-        const batchSize = 2;
+      const meta = document.querySelector(`.theme-meta[data-key="${key}"]`);
+      if (meta) meta.textContent = `${filtered}/${total}`;
+
+      await conn.query(`DROP TABLE IF EXISTS "${tableName}"`);
+
+      if (files.length > 0) {
+        const batchSize = 3;
         let totalLoaded = 0;
-        const catCounts = {};
+        let fields = null;
 
-        for (let i = 0; i < smartFiles.length && totalLoaded < limit; i += batchSize) {
-          const batch = smartFiles.slice(i, i + batchSize);
+        for (let i = 0; i < files.length && totalLoaded < limit; i += batchSize) {
+          const batch = files.slice(i, i + batchSize);
           const remaining = limit - totalLoaded;
-          log(`Loading places (${i + batch.length}/${smartFiles.length} files, ${total} total)...`);
+          log(`Loading ${type} (${Math.min(i + batch.length, files.length)}/${files.length} files, ${total} total)...`);
 
-          const files = batch.map(f => `'${f}'`).join(',');
-          await conn.query(`
-            INSERT INTO places
-            SELECT id, names.primary as name, categories.primary as cat,
-                   ST_X(geometry) as lon, ST_Y(geometry) as lat, geometry, bbox
-            FROM read_parquet([${files}], hive_partitioning=false)
-            WHERE ${bboxFilter(bbox)}
-            LIMIT ${remaining}`);
+          const fileList = batch.map(f => `'${f}'`).join(',');
+
+          if (i === 0) {
+            await conn.query(`
+              CREATE TABLE "${tableName}" AS
+              SELECT *, ST_GeometryType(geometry) as geom_type,
+                     ST_AsGeoJSON(geometry) as geojson,
+                     ST_X(ST_Centroid(geometry)) as centroid_lon,
+                     ST_Y(ST_Centroid(geometry)) as centroid_lat
+              FROM read_parquet([${fileList}], hive_partitioning=false)
+              WHERE ${bboxFilter(bbox)}
+              LIMIT ${remaining}
+            `);
+            fields = await getFieldsForTable(tableName, key);
+          } else {
+            await conn.query(`
+              INSERT INTO "${tableName}"
+              SELECT *, ST_GeometryType(geometry) as geom_type,
+                     ST_AsGeoJSON(geometry) as geojson,
+                     ST_X(ST_Centroid(geometry)) as centroid_lon,
+                     ST_Y(ST_Centroid(geometry)) as centroid_lat
+              FROM read_parquet([${fileList}], hive_partitioning=false)
+              WHERE ${bboxFilter(bbox)}
+              LIMIT ${remaining}
+            `);
+          }
 
           const newRows = (await conn.query(`
-            SELECT id, name, cat, lon, lat FROM places
-            WHERE ${pointFilter(bbox)}
+            SELECT ${fields.selectParts.join(', ')}
+            FROM "${tableName}"
             LIMIT ${limit} OFFSET ${totalLoaded}
           `)).toArray();
 
           for (const r of newRows) {
-            const cat = r.cat || '';
-            catCounts[cat] = (catCounts[cat] || 0) + 1;
-            if (r.lat && r.lon) {
-              const marker = L.circleMarker([Number(r.lat), Number(r.lon)], {
-                radius: 5, fillColor: '#e74c3c', color: '#c0392b', weight: 1, fillOpacity: 0.8
-              }).bindPopup(`<b>${r.name || '?'}</b><br>${cat}`);
-              marker.addTo(placesLayer);
-              placeMarkers.push({ marker, cat, id: r.id, lat: r.lat, lon: r.lon });
-            }
+            renderFeature(r, state, color, fields.extraFields);
           }
           totalLoaded += newRows.length;
           updateStats();
         }
-
-        buildCategoryUI(Object.entries(catCounts).sort((a, b) => b[1] - a[1]));
       }
-      placesBbox = { ...bbox };
+      state.bbox = { ...bbox };
     } else {
-      log('Querying cached places...');
-      const rows = (await conn.query(`SELECT id, name, cat, lon, lat FROM places WHERE ${pointFilter(bbox)}`)).toArray();
-      const catCounts = {};
-
-      for (const r of rows) {
-        const cat = r.cat || '';
-        catCounts[cat] = (catCounts[cat] || 0) + 1;
-        if (r.lat && r.lon) {
-          const marker = L.circleMarker([Number(r.lat), Number(r.lon)], {
-            radius: 5, fillColor: '#e74c3c', color: '#c0392b', weight: 1, fillOpacity: 0.8
-          }).bindPopup(`<b>${r.name || '?'}</b><br>${cat}`);
-          marker.addTo(placesLayer);
-          placeMarkers.push({ marker, cat, id: r.id, lat: r.lat, lon: r.lon });
-        }
-      }
-      buildCategoryUI(Object.entries(catCounts).sort((a, b) => b[1] - a[1]));
-    }
-
-    await updateCachedCounts();
-    log(`Loaded ${placeMarkers.length.toLocaleString()} places`, 'success');
-  } catch (e) {
-    log(`Error: ${e.message}`, 'error');
-    console.error(e);
-  } finally {
-    $('loadPlacesBtn').disabled = false;
-  }
-}
-
-async function loadBuildingsFromFiles(bbox, files, total, d) {
-  await conn.query(`CREATE TABLE buildings (id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
-
-  const batchSize = 5;
-  const seenIds = new Set();
-
-  for (let i = 0; i < files.length; i += batchSize) {
-    const batch = files.slice(i, i + batchSize);
-    log(`Loading buildings (${i + batch.length}/${files.length} files, ${total} total)...`);
-
-    const fileList = batch.map(f => `'${f}'`).join(',');
-    await conn.query(`
-      INSERT INTO buildings
-      SELECT DISTINCT id, names.primary as name, ST_AsGeoJSON(geometry) as geojson, geometry, bbox
-      FROM read_parquet([${fileList}], hive_partitioning=false) b
-      WHERE ${bboxFilter(bbox, 'b')}`);
-
-    const spatialCondition = d > 0
-      ? `ST_DWithin(b.geometry, p.geometry, ${d})`
-      : `ST_Contains(b.geometry, p.geometry)`;
-    const newRows = (await conn.query(`
-      SELECT DISTINCT b.id, b.geojson FROM buildings b
-      JOIN places p ON b.bbox.xmax >= p.lon - ${d} AND b.bbox.xmin <= p.lon + ${d}
-                   AND b.bbox.ymax >= p.lat - ${d} AND b.bbox.ymin <= p.lat + ${d}
-      WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')} AND ${spatialCondition}
-    `)).toArray();
-
-    for (const r of newRows) {
-      if (r.geojson && !seenIds.has(r.id)) {
-        seenIds.add(r.id);
-        renderBuilding(r.geojson, r.id);
-      }
-    }
-    updateStats();
-  }
-}
-
-async function getSmartFilteredFiles(dataType, bbox) {
-  const url = `${PROXY}/files/${dataType}?xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
-  const response = await fetch(url);
-  const files = await response.json();
-  const total = response.headers.get('X-Total-Files') || '?';
-  return { files, total };
-}
-
-async function loadBuildings() {
-  const bbox = getBbox();
-  const d = parseInt($('distanceSlider').value) / 111000;
-  const useCache = bboxContains(buildingsBbox, bbox);
-  const mode = document.querySelector('input[name="loadMode"]:checked')?.value || 'smart';
-
-  buildingsLayer.clearLayers();
-  buildingMarkers = [];
-  $('loadBuildingsBtn').disabled = true;
-
-  try {
-    const tables = (await conn.query(`SHOW TABLES`)).toArray();
-    if (!tables.some(t => t.name === 'places')) {
-      log('Load places first', 'error');
-      return;
-    }
-
-    if (!useCache) {
-      await conn.query(`DROP TABLE IF EXISTS buildings`);
-
-      if (mode === 'smart') {
-        log('Getting filtered file list...');
-        const { files, total } = await getSmartFilteredFiles('buildings', bbox);
-        if (files.length > 0) {
-          await loadBuildingsFromFiles(bbox, files, total, d);
-        } else {
-          await conn.query(`CREATE TABLE buildings (id VARCHAR, name VARCHAR, geojson VARCHAR, geometry GEOMETRY, bbox STRUCT(xmin DOUBLE, xmax DOUBLE, ymin DOUBLE, ymax DOUBLE))`);
-        }
-      } else {
-        const files = await listFiles('buildings', 'building');
-        await loadBuildingsFromFiles(bbox, files, files.length, d);
-      }
-
-      buildingsBbox = { ...bbox };
-    } else {
-      log('Querying cached buildings...');
-      const spatialCondition = d > 0
-        ? `ST_DWithin(b.geometry, p.geometry, ${d})`
-        : `ST_Contains(b.geometry, p.geometry)`;
+      log(`Querying cached ${type}...`);
+      const fields = await getFieldsForTable(tableName, key);
       const rows = (await conn.query(`
-        SELECT DISTINCT b.id, b.geojson FROM buildings b
-        JOIN places p ON b.bbox.xmax >= p.lon - ${d} AND b.bbox.xmin <= p.lon + ${d}
-                     AND b.bbox.ymax >= p.lat - ${d} AND b.bbox.ymin <= p.lat + ${d}
-        WHERE ${bboxFilter(bbox, 'b')} AND ${pointFilter(bbox, 'p')} AND ${spatialCondition}
+        SELECT ${fields.selectParts.join(', ')}
+        FROM "${tableName}"
+        WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
+          AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
       `)).toArray();
 
-      for (const r of rows) if (r.geojson) renderBuilding(r.geojson, r.id);
+      for (const r of rows) {
+        renderFeature(r, state, color, fields.extraFields);
+      }
     }
 
-    await updateCachedCounts();
-    log(`Loaded ${buildingMarkers.length.toLocaleString()} buildings`, 'success');
+    log(`${state.markers.length.toLocaleString()} ${type}`, 'success');
   } catch (e) {
-    log(`Error: ${e.message}`, 'error');
+    log(`Error loading ${type}: ${e.message}`, 'error');
     console.error(e);
   } finally {
-    $('loadBuildingsBtn').disabled = false;
+    if (row) row.classList.remove('loading');
   }
 }
 
-async function findIntersections() {
-  const checked = $('intersectCheck').checked;
-  const bbox = getBbox();
-  const d = parseInt($('distanceSlider').value) / 111000;
+function renderFeature(row, state, color, extraFields = []) {
+  const geomType = (row.geom_type || '').toUpperCase();
+  let leafletObj;
 
-  $('legend').style.display = checked ? 'block' : 'none';
-
-  if (!checked) {
-    for (const { marker } of placeMarkers) {
-      marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' });
-      if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
+  if (geomType.includes('POINT')) {
+    if (row.centroid_lat && row.centroid_lon) {
+      leafletObj = L.circleMarker(
+        [Number(row.centroid_lat), Number(row.centroid_lon)],
+        { radius: 5, fillColor: color.fill, color: color.stroke, weight: 1, fillOpacity: 0.8 }
+      );
     }
-    for (const { layer } of buildingMarkers) {
-      layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' });
-      if (!buildingsLayer.hasLayer(layer)) buildingsLayer.addLayer(layer);
+  } else if (geomType.includes('POLYGON')) {
+    if (row.geojson) {
+      leafletObj = L.geoJSON(JSON.parse(row.geojson), {
+        style: { fillColor: color.fill, color: color.stroke, weight: 1, fillOpacity: 0.4 }
+      });
     }
-    log(`${placeMarkers.length} places, ${buildingMarkers.length} buildings`, 'success');
-    return;
+  } else if (geomType.includes('LINE')) {
+    if (row.geojson) {
+      leafletObj = L.geoJSON(JSON.parse(row.geojson), {
+        style: { color: color.fill, weight: 2, opacity: 0.8 }
+      });
+    }
+  } else if (row.geojson) {
+    leafletObj = L.geoJSON(JSON.parse(row.geojson), {
+      style: { fillColor: color.fill, color: color.stroke, weight: 1, fillOpacity: 0.4 }
+    });
   }
 
-  try {
-    const tables = (await conn.query(`SHOW TABLES`)).toArray();
-    if (!tables.some(t => t.name === 'buildings')) {
-      log('Load buildings first', 'error');
-      $('intersectCheck').checked = false;
-      return;
-    }
-
-    log('Finding intersections...');
-
-    const placesWithBuildings = new Set(
-      (await conn.query(`
-        SELECT DISTINCT p.id FROM places p
-        JOIN buildings b ON b.bbox.xmax >= p.lon AND b.bbox.xmin <= p.lon
-                       AND b.bbox.ymax >= p.lat AND b.bbox.ymin <= p.lat
-        WHERE ${pointFilter(bbox, 'p')} AND ST_Contains(b.geometry, p.geometry)
-      `)).toArray().map(r => r.id)
-    );
-
-    const buildingsWithPlaces = new Set(
-      (await conn.query(`
-        SELECT DISTINCT b.id FROM buildings b
-        JOIN places p ON b.bbox.xmax >= p.lon AND b.bbox.xmin <= p.lon
-                     AND b.bbox.ymax >= p.lat AND b.bbox.ymin <= p.lat
-        WHERE ${pointFilter(bbox, 'p')} AND ST_Contains(b.geometry, p.geometry)
-      `)).toArray().map(r => r.id)
-    );
-
-    let matched = 0, unmatched = 0;
-    for (const { marker, id } of placeMarkers) {
-      if (placesWithBuildings.has(id)) {
-        marker.setStyle({ fillColor: '#27ae60', color: '#1e8449' });
-        if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
-        matched++;
-      } else {
-        marker.setStyle({ fillColor: '#e74c3c', color: '#c0392b' });
-        if (!placesLayer.hasLayer(marker)) placesLayer.addLayer(marker);
-        unmatched++;
+  if (leafletObj) {
+    const name = row.display_name || row.id || '?';
+    let popup = `<b>${name}</b>`;
+    for (let i = 0; i < extraFields.length; i++) {
+      const val = row[`_f${i}`];
+      if (val != null && val !== '') {
+        popup += `<br><small>${extraFields[i].label}: ${val}</small>`;
       }
     }
-
-    let containingBuildings = 0;
-    for (const { layer, id } of buildingMarkers) {
-      if (buildingsWithPlaces.has(id)) {
-        layer.setStyle({ fillColor: '#27ae60', color: '#1e8449' });
-        containingBuildings++;
-      } else {
-        layer.setStyle({ fillColor: '#3388ff', color: '#2266cc' });
-      }
-      if (!buildingsLayer.hasLayer(layer)) buildingsLayer.addLayer(layer);
-    }
-
-    log(`${matched} places matched | ${containingBuildings} buildings contain places`, 'success');
-  } catch (e) {
-    log(`Error: ${e.message}`, 'error');
-    console.error(e);
+    leafletObj.bindPopup(popup);
+    leafletObj.addTo(state.layer);
+    state.markers.push({ layer: leafletObj, id: row.id });
   }
 }
 
@@ -474,15 +445,7 @@ async function init() {
     conn = await db.connect();
     await conn.query('INSTALL spatial; LOAD spatial;');
 
-    $('loadPlacesBtn').disabled = false;
-    $('loadBuildingsBtn').disabled = false;
-
-    if (!fileCache['places/place']) {
-      log('Caching file lists...');
-      await listFiles('places', 'place');
-      await listFiles('buildings', 'building');
-    }
-    log('Ready', 'success');
+    await loadReleases();
   } catch (e) {
     log(`Init error: ${e.message}`, 'error');
     console.error(e);
