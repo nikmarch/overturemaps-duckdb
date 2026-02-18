@@ -204,9 +204,10 @@ function renderFootprints() {
     const bounds = [[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]];
     const rect = L.rectangle(bounds, {
       color: color?.stroke || '#000',
-      weight: 1,
+      weight: 0.8,
       fillColor: color?.fill || '#000',
-      fillOpacity: cached ? 0.03 : 0.08,
+      // Keep footprints subtle; they’re for context, not a layer.
+      fillOpacity: cached ? 0.015 : 0.04,
       dashArray: cached ? '4 6' : null,
       interactive: true,
     });
@@ -781,11 +782,11 @@ function renderFeature(row, state, color, extraFields = []) {
       leafletObj = L.circleMarker(
         [Number(row.centroid_lat), Number(row.centroid_lon)],
         {
-          radius: 5,
+          radius: 6,
           fillColor: intersects ? '#2ecc71' : color.fill,
           color: intersects ? '#1e8449' : color.stroke,
-          weight: intersects ? 2 : 1,
-          fillOpacity: 0.8,
+          weight: intersects ? 2.5 : 1.5,
+          fillOpacity: 0.95,
         }
       );
     }
@@ -795,15 +796,15 @@ function renderFeature(row, state, color, extraFields = []) {
         style: () => {
           // Big polygons should be much less intense.
           // For divisions, bias even more to transparency.
-          let fillOpacity = isDivisions ? 0.06 : 0.14;
-          return { fillColor: color.fill, color: color.stroke, weight: 1, opacity: 0.6, fillOpacity };
+          let fillOpacity = isDivisions ? 0.06 : 0.18;
+          return { fillColor: color.fill, color: color.stroke, weight: 1, opacity: 0.75, fillOpacity };
         }
       });
     }
   } else if (geomType.includes('LINE')) {
     if (row.geojson) {
       leafletObj = L.geoJSON(JSON.parse(row.geojson), {
-        style: { color: color.fill, weight: 2, opacity: 0.8 }
+        style: { color: color.fill, weight: 3, opacity: 0.95 }
       });
     }
   } else if (row.geojson) {
