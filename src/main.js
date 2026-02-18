@@ -87,6 +87,11 @@ let conn = null;
 let currentRelease = null;
 const themeState = {};
 
+// Visual history of load requests (what user asked the edge to fetch)
+const footprintsLayer = L.layerGroup();
+const FOOTPRINTS_KEY_PREFIX = `overture_footprints_${location.origin}`;
+let footprints = [];
+
 const DEFAULT_VIEW = [34.05, -118.25];
 const DEFAULT_ZOOM = 14;
 
@@ -98,6 +103,7 @@ const map = L.map('map').setView(
   hasHash && !isNaN(z) ? z : DEFAULT_ZOOM
 );
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+footprintsLayer.addTo(map);
 
 $('collapseBtn').onclick = () => {
   const body = $('controlsBody');
@@ -131,6 +137,67 @@ function updateStats() {
     }
   }
   $('shownStats').textContent = shown.length ? shown.join(', ') : '-';
+}
+
+function formatTs(ms) {
+  const d = new Date(ms);
+  return d.toLocaleString();
+}
+
+function footprintsStorageKey() {
+  return `${FOOTPRINTS_KEY_PREFIX}_${currentRelease || 'unknown'}`;
+}
+
+function loadFootprints() {
+  try {
+    footprints = JSON.parse(localStorage.getItem(footprintsStorageKey()) || '[]');
+  } catch {
+    footprints = [];
+  }
+}
+
+function saveFootprints() {
+  localStorage.setItem(footprintsStorageKey(), JSON.stringify(footprints));
+}
+
+function clearFootprintsLayer() {
+  footprintsLayer.clearLayers();
+}
+
+function renderFootprints() {
+  clearFootprintsLayer();
+  if (!$('footprintsCheck')?.checked) return;
+
+  for (const fp of footprints) {
+    const { bbox, color, cached } = fp;
+    const bounds = [[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]];
+    const rect = L.rectangle(bounds, {
+      color: color?.stroke || '#000',
+      weight: 1,
+      fillColor: color?.fill || '#000',
+      fillOpacity: cached ? 0.03 : 0.08,
+      dashArray: cached ? '4 6' : null,
+      interactive: true,
+    });
+
+    rect.bindPopup(
+      `<b>${fp.key}</b>` +
+      `<br><small>${cached ? 'cached query' : 'fresh load'}</small>` +
+      `<br><small>limit: ${Number(fp.limit).toLocaleString()}</small>` +
+      `<br><small>time: ${formatTs(fp.ts)}</small>`
+    );
+
+    rect.addTo(footprintsLayer);
+  }
+}
+
+function addFootprint({ key, bbox, limit, cached, color }) {
+  const fp = { key, bbox, limit, cached: !!cached, color, ts: Date.now() };
+  footprints.unshift(fp);
+  // keep last 50
+  footprints = footprints.slice(0, 50);
+  saveFootprints();
+  renderFootprints();
 }
 
 function log(msg, type = 'loading') {
@@ -182,6 +249,10 @@ async function onReleaseChange(release) {
     map.removeLayer(themeState[key].layer);
     delete themeState[key];
   }
+
+  // Load footprints for this release
+  loadFootprints();
+  renderFootprints();
 
   log('Loading themes...');
   const res = await fetch(`${PROXY}/themes?release=${release}`);
@@ -290,6 +361,9 @@ async function loadTheme(key) {
   const useCache = bboxContains(state.bbox, bbox);
   const color = getThemeColor(theme);
   const tableName = `${theme}_${type}`;
+
+  // Leave a visible track of what we asked the edge to load
+  addFootprint({ key, bbox, limit, cached: useCache, color });
 
   const row = document.querySelector(`.theme-row[data-key="${key}"]`);
   if (row) row.classList.add('loading');
@@ -444,6 +518,9 @@ async function init() {
     await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
     conn = await db.connect();
     await conn.query('INSTALL spatial; LOAD spatial;');
+
+    // UI handlers
+    $('footprintsCheck').onchange = () => renderFootprints();
 
     await loadReleases();
   } catch (e) {

@@ -144,6 +144,22 @@ button:disabled { background: #ccc; cursor: not-allowed; }
   gap: 2px;
 }
 
+.checkbox-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #666;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #007bff;
+}
+
 .theme-row {
   display: flex;
   align-items: center;
