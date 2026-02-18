@@ -92,6 +92,11 @@ const footprintsLayer = L.layerGroup();
 const FOOTPRINTS_KEY_PREFIX = `overture_footprints_${location.origin}`;
 let footprints = [];
 
+// Intersection highlighting (points only)
+let intersectionMode = false;
+let intersectionInfoByPointId = new Map();
+let lastIntersectionSig = null;
+
 const DEFAULT_VIEW = [34.05, -118.25];
 const DEFAULT_ZOOM = 14;
 
@@ -270,6 +275,12 @@ async function clearCache() {
     footprints = [];
     localStorage.removeItem(footprintsStorageKey());
     renderFootprints();
+
+    // Intersection highlight state
+    intersectionMode = false;
+    intersectionInfoByPointId = new Map();
+    lastIntersectionSig = null;
+    if ($('intersectionsCheck')) $('intersectionsCheck').checked = false;
 
     // 2) Drop local DuckDB tables
     if (conn) {
@@ -523,6 +534,12 @@ async function loadTheme(key) {
       }
     }
 
+    // After load, recompute intersections (if enabled) and repaint.
+    if (intersectionMode) {
+      await recomputeIntersections();
+      rerenderAllEnabledThemes();
+    }
+
     log(`${state.markers.length.toLocaleString()} ${type}`, 'success');
   } catch (e) {
     log(`Error loading ${type}: ${e.message}`, 'error');
@@ -534,6 +551,138 @@ async function loadTheme(key) {
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
+}
+
+function rerenderAllEnabledThemes() {
+  for (const key of Object.keys(themeState)) {
+    const state = themeState[key];
+    if (!state.enabled) continue;
+
+    // Re-render from local table, no edge fetch.
+    const [theme, type] = key.split('/');
+    const color = getThemeColor(theme);
+    const tableName = `${theme}_${type}`;
+
+    (async () => {
+      state.layer.clearLayers();
+      state.markers = [];
+      try {
+        const bbox = getBbox();
+        const fields = await getFieldsForTable(tableName, key);
+        const rows = (await conn.query(`
+          SELECT ${fields.selectParts.join(', ')}
+          FROM "${tableName}"
+          WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
+            AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
+        `)).toArray();
+        for (const r of rows) renderFeature(r, state, color, fields.extraFields);
+      } catch (e) {
+        console.error(e);
+      }
+      updateStats();
+    })();
+  }
+}
+
+function intersectionSignature() {
+  const enabledKeys = Object.keys(themeState).filter(k => themeState[k].enabled).sort();
+  const bbox = getBbox();
+  return JSON.stringify({
+    release: currentRelease,
+    enabledKeys,
+    bbox: [bbox.xmin, bbox.xmax, bbox.ymin, bbox.ymax].map(n => Number(n.toFixed(6))),
+  });
+}
+
+async function recomputeIntersections() {
+  if (!intersectionMode) {
+    intersectionInfoByPointId = new Map();
+    lastIntersectionSig = null;
+    return;
+  }
+
+  if (!conn) return;
+
+  const sig = intersectionSignature();
+  if (sig === lastIntersectionSig) return;
+  lastIntersectionSig = sig;
+
+  const enabledKeys = Object.keys(themeState).filter(k => themeState[k].enabled);
+  if (enabledKeys.length < 2) {
+    intersectionInfoByPointId = new Map();
+    return;
+  }
+
+  // Source: all enabled point layers in viewport
+  // Targets: all enabled non-point layers in viewport
+  const pointKeys = [];
+  const targetKeys = [];
+
+  for (const key of enabledKeys) {
+    const [theme, type] = key.split('/');
+    const table = `${theme}_${type}`;
+
+    try {
+      const sample = (await conn.query(`SELECT geom_type FROM "${table}" LIMIT 1`)).toArray();
+      const gt = (sample?.[0]?.geom_type || '').toUpperCase();
+      if (gt.includes('POINT')) pointKeys.push(key);
+      else targetKeys.push(key);
+    } catch {
+      // ignore broken tables
+    }
+  }
+
+  if (pointKeys.length === 0 || targetKeys.length === 0) {
+    intersectionInfoByPointId = new Map();
+    return;
+  }
+
+  const bbox = getBbox();
+  const hits = new Map();
+
+  // Pairwise point->target intersects, prefiltered by bbox struct.
+  for (const pk of pointKeys) {
+    const [ptheme, ptype] = pk.split('/');
+    const ptable = `${ptheme}_${ptype}`;
+
+    for (const tk of targetKeys) {
+      const [ttheme, ttype] = tk.split('/');
+      const ttable = `${ttheme}_${ttype}`;
+      const label = `${ttheme}/${ttype}`;
+
+      // NOTE: bbox struct exists on raw parquet rows; we stored it in the table as `bbox`.
+      // We also have centroid_{lon,lat} for quick viewport filtering.
+      const q = `
+        SELECT p.id AS pid
+        FROM "${ptable}" p
+        JOIN "${ttable}" t
+          ON t.bbox.xmax >= p.centroid_lon
+         AND t.bbox.xmin <= p.centroid_lon
+         AND t.bbox.ymax >= p.centroid_lat
+         AND t.bbox.ymin <= p.centroid_lat
+        WHERE p.centroid_lon BETWEEN ${bbox.xmin} AND ${bbox.xmax}
+          AND p.centroid_lat BETWEEN ${bbox.ymin} AND ${bbox.ymax}
+          AND t.centroid_lon BETWEEN ${bbox.xmin} AND ${bbox.xmax}
+          AND t.centroid_lat BETWEEN ${bbox.ymin} AND ${bbox.ymax}
+          AND ST_Intersects(t.geometry, p.geometry)
+      `;
+
+      try {
+        const rows = (await conn.query(q)).toArray();
+        for (const r of rows) {
+          const arr = hits.get(r.pid) || [];
+          if (!arr.includes(label)) arr.push(label);
+          hits.set(r.pid, arr);
+        }
+      } catch (e) {
+        console.warn('intersection query failed for', pk, 'x', tk, e?.message);
+      }
+    }
+  }
+
+  intersectionInfoByPointId = new Map(
+    [...hits.entries()].map(([id, arr]) => [id, { hits: arr }])
+  );
 }
 
 function boundsAreaDeg2(bounds) {
@@ -588,12 +737,19 @@ function renderFeature(row, state, color, extraFields = []) {
   let leafletObj;
 
   const isDivisions = state?.key?.startsWith?.('divisions/');
+  const intersects = intersectionMode && geomType.includes('POINT') && intersectionInfoByPointId.has(row.id);
 
   if (geomType.includes('POINT')) {
     if (row.centroid_lat && row.centroid_lon) {
       leafletObj = L.circleMarker(
         [Number(row.centroid_lat), Number(row.centroid_lon)],
-        { radius: 5, fillColor: color.fill, color: color.stroke, weight: 1, fillOpacity: 0.8 }
+        {
+          radius: 5,
+          fillColor: intersects ? '#2ecc71' : color.fill,
+          color: intersects ? '#1e8449' : color.stroke,
+          weight: intersects ? 2 : 1,
+          fillOpacity: 0.8,
+        }
       );
     }
   } else if (geomType.includes('POLYGON')) {
@@ -628,6 +784,16 @@ function renderFeature(row, state, color, extraFields = []) {
         popup += `<br><small>${extraFields[i].label}: ${val}</small>`;
       }
     }
+
+    if (intersectionMode && geomType.includes('POINT')) {
+      const info = intersectionInfoByPointId.get(row.id);
+      if (info?.hits?.length) {
+        popup += `<br><small>intersects: ${info.hits.join(', ')}</small>`;
+      } else {
+        popup += `<br><small>intersects: none</small>`;
+      }
+    }
+
     popup += `<br><a href="javascript:void(0)" class="zoom-to">zoom to</a>`;
     leafletObj.bindPopup(popup);
 
@@ -669,6 +835,11 @@ async function init() {
 
     // UI handlers
     $('footprintsCheck').onchange = () => renderFootprints();
+    $('intersectionsCheck').onchange = async () => {
+      intersectionMode = $('intersectionsCheck').checked;
+      await recomputeIntersections();
+      rerenderAllEnabledThemes();
+    };
     $('clearCacheBtn').onclick = clearCache;
 
     await loadReleases();
