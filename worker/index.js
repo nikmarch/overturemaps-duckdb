@@ -29,7 +29,8 @@ export default {
       return handleListThemes(release);
     }
 
-    // GET /files?release=X&theme=Y&type=Z&xmin=...&xmax=...&ymin=...&ymax=...
+    // GET /files?release=X&theme=Y&type=Z[&xmin=...&xmax=...&ymin=...&ymax=...]
+    // Simplified: return ALL files for the theme/type (no spatial index / no DO), and let DuckDB do bbox filtering.
     if (url.pathname === '/files') {
       const release = url.searchParams.get('release');
       const theme = url.searchParams.get('theme');
@@ -37,10 +38,7 @@ export default {
       if (!release || !theme || !type) {
         return new Response('Missing release/theme/type params', { status: 400, headers: corsHeaders });
       }
-      const doName = `${release}/${theme}/${type}`;
-      const id = env.SPATIAL_INDEX.idFromName(doName);
-      const stub = env.SPATIAL_INDEX.get(id);
-      return stub.fetch(request);
+      return handleListFiles(release, theme, type);
     }
 
     // GET /index/clear?release=X&theme=Y&type=Z
@@ -123,6 +121,21 @@ async function handleListThemes(release) {
 
   return new Response(JSON.stringify(results), {
     headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600' }
+  });
+}
+
+async function handleListFiles(release, theme, type) {
+  const prefix = `release/${release}/theme=${theme}/type=${type}/`;
+  const files = await listFiles(prefix);
+  return new Response(JSON.stringify(files), {
+    headers: {
+      ...corsHeaders,
+      'Content-Type': 'application/json',
+      // Old API shape expects both headers; filtered == total in this simplified mode.
+      'X-Total-Files': String(files.length),
+      'X-Filtered-Files': String(files.length),
+      'Cache-Control': 'no-store',
+    }
   });
 }
 
