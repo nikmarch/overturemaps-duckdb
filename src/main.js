@@ -187,6 +187,12 @@ function renderFootprints() {
       `<br><small>time: ${formatTs(fp.ts)}</small>`
     );
 
+    // dblclick footprint -> jump to that viewport
+    rect.on('dblclick', (e) => {
+      L.DomEvent.stop(e);
+      map.fitBounds(bounds, { padding: [20, 20] });
+    });
+
     rect.addTo(footprintsLayer);
   }
 }
@@ -271,7 +277,7 @@ function buildThemeUI(themes) {
 
     const layer = L.layerGroup();
     layer.addTo(map);
-    themeState[key] = { layer, markers: [], bbox: null, limit: 33000, enabled: false };
+    themeState[key] = { key, layer, markers: [], bbox: null, limit: 33000, enabled: false };
 
     const row = document.createElement('div');
     row.className = 'theme-row';
@@ -462,9 +468,54 @@ async function loadTheme(key) {
   }
 }
 
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function boundsAreaDeg2(bounds) {
+  // Rough proxy, good enough for ordering/opacity.
+  const sw = bounds.getSouthWest();
+  const ne = bounds.getNorthEast();
+  return Math.abs((ne.lat - sw.lat) * (ne.lng - sw.lng));
+}
+
+function applyZOrderForDivisions(layer) {
+  // Smaller divisions should sit above big ones.
+  try {
+    const b = layer.getBounds?.();
+    if (!b) return;
+    const a = boundsAreaDeg2(b);
+    if (a > 5) layer.bringToBack?.();
+    else layer.bringToFront?.();
+  } catch { /* ignore */ }
+}
+
+function attachDblClickToFit(layer, opts = {}) {
+  const pointZoom = opts.pointZoom ?? 16;
+  if (!layer) return;
+
+  layer.on('dblclick', (e) => {
+    L.DomEvent.stop(e);
+
+    // For circle markers
+    if (layer.getLatLng) {
+      map.setView(layer.getLatLng(), Math.max(map.getZoom(), pointZoom));
+      return;
+    }
+
+    // For GeoJSON / polylines / polygons
+    const bounds = layer.getBounds?.();
+    if (bounds && bounds.isValid && bounds.isValid()) {
+      map.fitBounds(bounds, { padding: [20, 20] });
+    }
+  });
+}
+
 function renderFeature(row, state, color, extraFields = []) {
   const geomType = (row.geom_type || '').toUpperCase();
   let leafletObj;
+
+  const isDivisions = state?.key?.startsWith?.('divisions/');
 
   if (geomType.includes('POINT')) {
     if (row.centroid_lat && row.centroid_lon) {
@@ -476,7 +527,12 @@ function renderFeature(row, state, color, extraFields = []) {
   } else if (geomType.includes('POLYGON')) {
     if (row.geojson) {
       leafletObj = L.geoJSON(JSON.parse(row.geojson), {
-        style: { fillColor: color.fill, color: color.stroke, weight: 1, fillOpacity: 0.4 }
+        style: () => {
+          // Big polygons should be much less intense.
+          // For divisions, bias even more to transparency.
+          let fillOpacity = isDivisions ? 0.06 : 0.14;
+          return { fillColor: color.fill, color: color.stroke, weight: 1, opacity: 0.6, fillOpacity };
+        }
       });
     }
   } else if (geomType.includes('LINE')) {
@@ -487,7 +543,7 @@ function renderFeature(row, state, color, extraFields = []) {
     }
   } else if (row.geojson) {
     leafletObj = L.geoJSON(JSON.parse(row.geojson), {
-      style: { fillColor: color.fill, color: color.stroke, weight: 1, fillOpacity: 0.4 }
+      style: { fillColor: color.fill, color: color.stroke, weight: 1, opacity: 0.6, fillOpacity: 0.12 }
     });
   }
 
@@ -501,7 +557,24 @@ function renderFeature(row, state, color, extraFields = []) {
       }
     }
     leafletObj.bindPopup(popup);
+
+    // dblclick feature -> zoom to it
+    attachDblClickToFit(leafletObj, { pointZoom: 16 });
+
     leafletObj.addTo(state.layer);
+
+    // Divisions: keep small ones in front
+    if (isDivisions && leafletObj.getBounds) {
+      applyZOrderForDivisions(leafletObj);
+
+      // Also scale polygon fill opacity by rough size so huge ones are faint
+      try {
+        const a = boundsAreaDeg2(leafletObj.getBounds());
+        const dyn = clamp(0.12 / (1 + Math.log10(a + 1)), 0.02, 0.10);
+        leafletObj.setStyle?.({ fillOpacity: dyn, opacity: 0.5, weight: 1 });
+      } catch { /* ignore */ }
+    }
+
     state.markers.push({ layer: leafletObj, id: row.id });
   }
 }
