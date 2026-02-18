@@ -184,13 +184,18 @@ function renderFootprints() {
       `<b>${fp.key}</b>` +
       `<br><small>${cached ? 'cached query' : 'fresh load'}</small>` +
       `<br><small>limit: ${Number(fp.limit).toLocaleString()}</small>` +
-      `<br><small>time: ${formatTs(fp.ts)}</small>`
+      `<br><small>time: ${formatTs(fp.ts)}</small>` +
+      `<br><a href="#" class="zoom-to">zoom to viewport</a>`
     );
 
-    // dblclick footprint -> jump to that viewport
-    rect.on('dblclick', (e) => {
-      L.DomEvent.stop(e);
-      map.fitBounds(bounds, { padding: [20, 20] });
+    rect.on('popupopen', (e) => {
+      const el = e.popup.getElement();
+      const a = el && el.querySelector('a.zoom-to');
+      if (!a) return;
+      a.onclick = (ev) => {
+        ev.preventDefault();
+        map.fitBounds(bounds, { padding: [20, 20] });
+      };
     });
 
     rect.addTo(footprintsLayer);
@@ -490,24 +495,30 @@ function applyZOrderForDivisions(layer) {
   } catch { /* ignore */ }
 }
 
-function attachDblClickToFit(layer, opts = {}) {
+function attachZoomLink(layer, opts = {}) {
   const pointZoom = opts.pointZoom ?? 16;
   if (!layer) return;
 
-  layer.on('dblclick', (e) => {
-    L.DomEvent.stop(e);
+  layer.on('popupopen', (e) => {
+    const el = e.popup.getElement();
+    const a = el && el.querySelector('a.zoom-to');
+    if (!a) return;
 
-    // For circle markers
-    if (layer.getLatLng) {
-      map.setView(layer.getLatLng(), Math.max(map.getZoom(), pointZoom));
-      return;
-    }
+    a.onclick = (ev) => {
+      ev.preventDefault();
 
-    // For GeoJSON / polylines / polygons
-    const bounds = layer.getBounds?.();
-    if (bounds && bounds.isValid && bounds.isValid()) {
-      map.fitBounds(bounds, { padding: [20, 20] });
-    }
+      // For circle markers
+      if (layer.getLatLng) {
+        map.setView(layer.getLatLng(), Math.max(map.getZoom(), pointZoom));
+        return;
+      }
+
+      // For GeoJSON / polylines / polygons
+      const bounds = layer.getBounds?.();
+      if (bounds && bounds.isValid && bounds.isValid()) {
+        map.fitBounds(bounds, { padding: [20, 20] });
+      }
+    };
   });
 }
 
@@ -556,10 +567,11 @@ function renderFeature(row, state, color, extraFields = []) {
         popup += `<br><small>${extraFields[i].label}: ${val}</small>`;
       }
     }
+    popup += `<br><a href="#" class="zoom-to">zoom to</a>`;
     leafletObj.bindPopup(popup);
 
-    // dblclick feature -> zoom to it
-    attachDblClickToFit(leafletObj, { pointZoom: 16 });
+    // click link in popup -> zoom to it
+    attachZoomLink(leafletObj, { pointZoom: 16 });
 
     leafletObj.addTo(state.layer);
 
