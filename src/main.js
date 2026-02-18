@@ -3,6 +3,7 @@ import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0
 const $ = id => document.getElementById(id);
 const PROXY = '/api';
 
+// Legacy top-level theme colors (kept as fallback).
 const THEME_COLORS = {
   places:         { fill: '#e74c3c', stroke: '#c0392b' },
   buildings:      { fill: '#3388ff', stroke: '#2266cc' },
@@ -11,7 +12,17 @@ const THEME_COLORS = {
   addresses:      { fill: '#8e44ad', stroke: '#6c3483' },
   divisions:      { fill: '#2c3e50', stroke: '#1a252f' },
 };
+
+// 16-category palette (Tableau-ish). Assigned per (theme/type) key, deterministically.
+const PALETTE_16 = [
+  '#4E79A7', '#F28E2B', '#E15759', '#76B7B2',
+  '#59A14F', '#EDC948', '#B07AA1', '#FF9DA7',
+  '#9C755F', '#BAB0AC', '#1F77B4', '#FF7F0E',
+  '#2CA02C', '#D62728', '#9467BD', '#8C564B',
+];
+
 const DEFAULT_COLOR = { fill: '#95a5a6', stroke: '#7f8c8d' };
+const THEME_KEY_COLORS = {}; // key -> {fill, stroke}
 
 // Per-type fields to extract for popups. Each entry: { sql: 'SQL expr', label: 'Display label' }
 // These are tried in order; missing columns are skipped at runtime
@@ -129,7 +140,22 @@ map.on('moveend', () => {
   history.replaceState(null, '', `#${map.getZoom()}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`);
 });
 
-function getThemeColor(theme) {
+function darkenHex(hex, amount = 0.22) {
+  const s = hex.replace('#', '');
+  const r = parseInt(s.slice(0, 2), 16);
+  const g = parseInt(s.slice(2, 4), 16);
+  const b = parseInt(s.slice(4, 6), 16);
+  const k = 1 - amount;
+  const toHex = (v) => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0');
+  return `#${toHex(r * k)}${toHex(g * k)}${toHex(b * k)}`;
+}
+
+function getThemeColor(key) {
+  // Prefer per-(theme/type) key mapping for maximum distinctness in the list.
+  if (THEME_KEY_COLORS[key]) return THEME_KEY_COLORS[key];
+
+  // Fallback: color by top-level theme.
+  const theme = String(key || '').split('/')[0];
   return THEME_COLORS[theme] || DEFAULT_COLOR;
 }
 
@@ -346,9 +372,20 @@ function buildThemeUI(themes) {
   const container = $('themeList');
   container.innerHTML = '';
 
-  for (const { theme, type } of themes) {
+  // Stable order + stable colors.
+  const sorted = [...themes].sort((a, b) => (`${a.theme}/${a.type}`).localeCompare(`${b.theme}/${b.type}`));
+
+  // Assign distinct colors per (theme/type) key (up to 16 before cycling).
+  for (const k of Object.keys(THEME_KEY_COLORS)) delete THEME_KEY_COLORS[k];
+  sorted.forEach(({ theme, type }, i) => {
     const key = `${theme}/${type}`;
-    const color = getThemeColor(theme);
+    const fill = PALETTE_16[i % PALETTE_16.length];
+    THEME_KEY_COLORS[key] = { fill, stroke: darkenHex(fill) };
+  });
+
+  for (const { theme, type } of sorted) {
+    const key = `${theme}/${type}`;
+    const color = getThemeColor(key);
 
     const layer = L.layerGroup();
     layer.addTo(map);
@@ -440,7 +477,7 @@ async function loadTheme(key) {
   const bbox = getBbox();
   const limit = state.limit;
   const useCache = bboxContains(state.bbox, bbox);
-  const color = getThemeColor(theme);
+  const color = getThemeColor(key);
   const tableName = `${theme}_${type}`;
 
   // Leave a visible track of what we asked the edge to load
@@ -560,7 +597,7 @@ function rerenderAllEnabledThemes() {
 
     // Re-render from local table, no edge fetch.
     const [theme, type] = key.split('/');
-    const color = getThemeColor(theme);
+    const color = getThemeColor(key);
     const tableName = `${theme}_${type}`;
 
     (async () => {
