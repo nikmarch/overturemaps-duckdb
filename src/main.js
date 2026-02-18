@@ -185,7 +185,7 @@ function renderFootprints() {
       `<br><small>${cached ? 'cached query' : 'fresh load'}</small>` +
       `<br><small>limit: ${Number(fp.limit).toLocaleString()}</small>` +
       `<br><small>time: ${formatTs(fp.ts)}</small>` +
-      `<br><a href="#" class="zoom-to">zoom to viewport</a>`
+      `<br><a href="javascript:void(0)" class="zoom-to">zoom to viewport</a>`
     );
 
     rect.on('popupopen', (e) => {
@@ -194,7 +194,9 @@ function renderFootprints() {
       if (!a) return;
       a.onclick = (ev) => {
         ev.preventDefault();
-        map.fitBounds(bounds, { padding: [20, 20] });
+        ev.stopPropagation();
+        // Aim to match the cached/requested bbox as closely as Leaflet allows.
+        map.fitBounds(bounds, { padding: [0, 0] });
       };
     });
 
@@ -541,12 +543,13 @@ function boundsAreaDeg2(bounds) {
   return Math.abs((ne.lat - sw.lat) * (ne.lng - sw.lng));
 }
 
-function applyZOrderForDivisions(layer) {
-  // Smaller divisions should sit above big ones.
+function applyZOrderBySize(layer) {
+  // Smaller geometries should sit above big ones (regardless of theme).
   try {
     const b = layer.getBounds?.();
     if (!b) return;
     const a = boundsAreaDeg2(b);
+    // Heuristic: very large -> back, otherwise front.
     if (a > 5) layer.bringToBack?.();
     else layer.bringToFront?.();
   } catch { /* ignore */ }
@@ -563,6 +566,7 @@ function attachZoomLink(layer, opts = {}) {
 
     a.onclick = (ev) => {
       ev.preventDefault();
+      ev.stopPropagation();
 
       // For circle markers
       if (layer.getLatLng) {
@@ -573,7 +577,7 @@ function attachZoomLink(layer, opts = {}) {
       // For GeoJSON / polylines / polygons
       const bounds = layer.getBounds?.();
       if (bounds && bounds.isValid && bounds.isValid()) {
-        map.fitBounds(bounds, { padding: [20, 20] });
+        map.fitBounds(bounds, { padding: [0, 0] });
       }
     };
   });
@@ -624,7 +628,7 @@ function renderFeature(row, state, color, extraFields = []) {
         popup += `<br><small>${extraFields[i].label}: ${val}</small>`;
       }
     }
-    popup += `<br><a href="#" class="zoom-to">zoom to</a>`;
+    popup += `<br><a href="javascript:void(0)" class="zoom-to">zoom to</a>`;
     leafletObj.bindPopup(popup);
 
     // click link in popup -> zoom to it
@@ -632,11 +636,13 @@ function renderFeature(row, state, color, extraFields = []) {
 
     leafletObj.addTo(state.layer);
 
-    // Divisions: keep small ones in front
-    if (isDivisions && leafletObj.getBounds) {
-      applyZOrderForDivisions(leafletObj);
+    // Global rule: keep small geometries in front of big ones
+    if (leafletObj.getBounds) {
+      applyZOrderBySize(leafletObj);
+    }
 
-      // Also scale polygon fill opacity by rough size so huge ones are faint
+    // Divisions: also scale polygon fill opacity by rough size so huge ones are faint
+    if (isDivisions && leafletObj.getBounds) {
       try {
         const a = boundsAreaDeg2(leafletObj.getBounds());
         const dyn = clamp(0.12 / (1 + Math.log10(a + 1)), 0.02, 0.10);
