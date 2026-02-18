@@ -251,6 +251,63 @@ async function loadReleases() {
   }
 }
 
+async function clearCache() {
+  if (!currentRelease) return;
+
+  const btn = $('clearCacheBtn');
+  btn.disabled = true;
+
+  try {
+    if (!confirm('Clear cache? This will: \n• clear footprints (localStorage)\n• drop local DuckDB tables\n• clear edge spatial index for all themes')) {
+      return;
+    }
+
+    log('Clearing cache...');
+
+    // 1) Footprints (local)
+    footprints = [];
+    localStorage.removeItem(footprintsStorageKey());
+    renderFootprints();
+
+    // 2) Drop local DuckDB tables
+    if (conn) {
+      const tables = (await conn.query(`SHOW TABLES`)).toArray().map(t => t.name);
+      for (const t of tables) {
+        // DuckDB internal tables shouldn't show up here, but keep it safe.
+        if (!t) continue;
+        await conn.query(`DROP TABLE IF EXISTS "${t}"`);
+      }
+    }
+
+    // Reset UI state for themes
+    for (const key of Object.keys(themeState)) {
+      themeState[key].layer.clearLayers();
+      themeState[key].markers = [];
+      themeState[key].bbox = null;
+      const row = document.querySelector(`.theme-row[data-key="${key}"]`);
+      const cb = row && row.querySelector('input[type="checkbox"]');
+      if (cb) cb.checked = false;
+      themeState[key].enabled = false;
+    }
+
+    // 3) Clear edge index caches
+    const requests = Object.keys(themeState).map((key) => {
+      const [theme, type] = key.split('/');
+      const url = `${PROXY}/index/clear?release=${encodeURIComponent(currentRelease)}&theme=${encodeURIComponent(theme)}&type=${encodeURIComponent(type)}`;
+      return fetch(url).catch(() => null);
+    });
+    await Promise.all(requests);
+
+    updateStats();
+    log('Cache cleared', 'success');
+  } catch (e) {
+    console.error(e);
+    log(`Clear cache error: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function onReleaseChange(release) {
   currentRelease = release;
 
@@ -606,6 +663,7 @@ async function init() {
 
     // UI handlers
     $('footprintsCheck').onchange = () => renderFootprints();
+    $('clearCacheBtn').onclick = clearCache;
 
     await loadReleases();
   } catch (e) {

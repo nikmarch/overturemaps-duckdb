@@ -116,6 +116,17 @@ button {
 button:hover:not(:disabled) { background: #0056b3; transform: translateY(-1px); }
 button:disabled { background: #ccc; cursor: not-allowed; }
 
+.btn-row {
+  display: flex;
+}
+
+#clearCacheBtn {
+  width: 100%;
+  background: #6c757d;
+}
+
+#clearCacheBtn:hover:not(:disabled) { background: #5a6268; }
+
 .select-row {
   display: flex;
   flex-direction: column;
