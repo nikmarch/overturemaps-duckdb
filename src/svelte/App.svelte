@@ -1,51 +1,25 @@
 <script>
-  import StatusBar from './components/StatusBar.svelte';
-  import StatsBar from './components/StatsBar.svelte';
-  import ReleaseSelect from './components/ReleaseSelect.svelte';
-  import ThemeList from './components/ThemeList.svelte';
   import SnapviewHistory from './components/SnapviewHistory.svelte';
-  import { clearCache, setShowSnapviewsCtrl, setHighlightIntersections } from '../lib/controller.js';
-  import { showSnapviews, highlightIntersections } from '../lib/stores.js';
+  import MapLoadingOverlay from './components/MapLoadingOverlay.svelte';
+  import LoadModal from './components/LoadModal.svelte';
+  import ViewportCapPill from './components/ViewportCapPill.svelte';
+  import { loadArea } from '../lib/controller.js';
 
-  let controlsCollapsed = $state(localStorage.getItem('controlsCollapsed') === 'true');
+  let modalOpen = $state(false);
 
-  function toggleCollapse() {
-    controlsCollapsed = !controlsCollapsed;
-    localStorage.setItem('controlsCollapsed', controlsCollapsed);
+  function handleLoad(keys) {
+    loadArea(keys);
   }
 </script>
 
-<div id="map"></div>
-<div id="controls">
-  <div id="controlsHeader">
-    <StatusBar />
-    <button id="collapseBtn" title="Toggle controls" onclick={toggleCollapse}>
-      {controlsCollapsed ? '+' : '−'}
-    </button>
-  </div>
-
-  <StatsBar />
-
-  {#if !controlsCollapsed}
-    <div id="controlsBody">
-      <ReleaseSelect />
-
-      <div class="checkbox-row">
-        <label>
-          <input type="checkbox" checked={$showSnapviews} onchange={(e) => setShowSnapviewsCtrl(e.target.checked)}>
-          show snapviews
-        </label>
-        <label>
-          <input type="checkbox" checked={$highlightIntersections} onchange={(e) => setHighlightIntersections(e.target.checked)}>
-          highlight intersections (points)
-        </label>
-      </div>
-
-      <ThemeList />
-
-      <SnapviewHistory />
-
-      <button class="clear-cache-btn" type="button" onclick={clearCache}>Clear cache</button>
-    </div>
-  {/if}
+<div id="map">
+  <MapLoadingOverlay />
 </div>
+
+<button class="load-area-btn" onclick={() => modalOpen = true} title="Load themes for current viewport">
+  Load Area
+</button>
+
+<LoadModal bind:open={modalOpen} onload={handleLoad} />
+<ViewportCapPill />
+<SnapviewHistory />

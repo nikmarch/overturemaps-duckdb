@@ -14,10 +14,12 @@ import {
   releases as releasesStore,
   selectedRelease as selectedReleaseStore,
   viewportStats as viewportStatsStore,
+  viewportCap as viewportCapStore,
   updateSnapviewTheme,
   checkSnapviewComplete,
   failSnapview,
 } from './stores.js';
+import { get } from 'svelte/store';
 
 export const themeState = {};
 export let currentRelease = null;
@@ -44,19 +46,28 @@ export function assignColors(themes) {
   return sorted;
 }
 
+// Per-theme render budget: viewportCap / enabledThemeCount
+export function getRenderLimit() {
+  const cap = get(viewportCapStore);
+  const enabledCount = Object.values(themeState).filter(s => s.enabled).length || 1;
+  return Math.max(1, Math.floor(cap / enabledCount));
+}
+
 export function updateStats() {
   const shown = [];
   let enabledCount = 0;
+  let totalRendered = 0;
   const totalThemes = Object.keys(themeState).length;
   for (const [key, state] of Object.entries(themeState)) {
     if (state.enabled) enabledCount++;
     if (state.markers.length > 0) {
       const type = key.split('/')[1];
       shown.push(`${state.markers.length.toLocaleString()} ${type}`);
+      totalRendered += state.markers.length;
     }
   }
   const shownText = shown.length ? shown.join(', ') : '-';
-  viewportStatsStore.update(s => ({ ...s, shownText, enabledCount, totalThemes }));
+  viewportStatsStore.update(s => ({ ...s, shownText, enabledCount, totalThemes, totalRendered }));
 }
 
 export function initTheme(key) {
@@ -110,6 +121,7 @@ async function rerenderThemeFromCache(key) {
   const tableName = `${theme}_${type}`;
   const color = getThemeColor(key);
   const bbox = getBbox();
+  const renderLimit = getRenderLimit();
   const t0 = performance.now();
 
   state.layer.clearLayers();
@@ -122,7 +134,7 @@ async function rerenderThemeFromCache(key) {
       FROM "${tableName}"
       WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
         AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
-      LIMIT ${state.limit}
+      LIMIT ${renderLimit}
     `)).toArray();
     await renderBatched(rows, state, color, fields.extraFields);
   } catch (e) {
@@ -196,7 +208,9 @@ export async function loadTheme(key, snapviewId) {
       if (files.length > 0) {
         const batchSize = 3;
         let totalLoaded = 0;
+        let totalRendered = 0;
         let fields = null;
+        const renderLimit = getRenderLimit();
 
         for (let i = 0; i < files.length && totalLoaded < limit; i += batchSize) {
           const batch = files.slice(i, i + batchSize);
@@ -236,9 +250,13 @@ export async function loadTheme(key, snapviewId) {
             LIMIT ${limit} OFFSET ${totalLoaded}
           `)).toArray();
 
-          for (const r of newRows) {
+          // Render only up to the per-theme render budget
+          const renderBudget = renderLimit - totalRendered;
+          const toRender = renderBudget > 0 ? newRows.slice(0, renderBudget) : [];
+          for (const r of toRender) {
             renderFeature(r, state, color, fields.extraFields);
           }
+          totalRendered += toRender.length;
           totalLoaded += newRows.length;
           updateStats();
 
@@ -258,13 +276,14 @@ export async function loadTheme(key, snapviewId) {
       state.loadedCount = state.markers.length;
     } else {
       log(`Querying cached ${type}...`);
+      const renderLimit = getRenderLimit();
       const fields = await getFieldsForTable(conn, tableName, key);
       const rows = (await conn.query(`
         SELECT ${fields.selectParts.join(', ')}
         FROM "${tableName}"
         WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
           AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
-        LIMIT ${limit}
+        LIMIT ${renderLimit}
       `)).toArray();
 
       await renderBatched(rows, state, color, fields.extraFields);
@@ -344,7 +363,7 @@ export async function enableThemeFromCache(key, snapviewBbox) {
   const [theme, type] = key.split('/');
   const tableName = `${theme}_${type}`;
   const color = getThemeColor(key);
-  const limit = state.limit;
+  const renderLimit = getRenderLimit();
   const t0 = performance.now();
 
   state.enabled = true;
@@ -360,7 +379,7 @@ export async function enableThemeFromCache(key, snapviewBbox) {
       FROM "${tableName}"
       WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
         AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
-      LIMIT ${limit}
+      LIMIT ${renderLimit}
     `)).toArray();
     await renderBatched(rows, state, color, fields.extraFields);
     rowCount = rows.length;
@@ -389,6 +408,7 @@ export function disableTheme(key) {
 
 export async function rerenderAllEnabled() {
   const conn = getConn();
+  const renderLimit = getRenderLimit();
   for (const key of Object.keys(themeState)) {
     const state = themeState[key];
     if (!state.enabled) continue;
@@ -407,7 +427,7 @@ export async function rerenderAllEnabled() {
         FROM "${tableName}"
         WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
           AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
-        LIMIT ${state.limit}
+        LIMIT ${renderLimit}
       `)).toArray();
       await renderBatched(rows, state, color, fields.extraFields);
     } catch (e) {

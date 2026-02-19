@@ -14,8 +14,15 @@ export const themeUi = writable({});
 export const showSnapviews = writable(true);
 export const highlightIntersections = writable(false);
 
-// { shownText, enabledCount, totalThemes, viewportText }
-export const viewportStats = writable({ shownText: '-', enabledCount: 0, totalThemes: 0, viewportText: '-' });
+// Viewport render cap — max total features rendered across all themes
+const VIEWPORT_CAP_KEY = 'overture_viewport_cap';
+const DEFAULT_VIEWPORT_CAP = 3000;
+const savedCap = parseInt(localStorage.getItem(VIEWPORT_CAP_KEY), 10);
+export const viewportCap = writable(Number.isFinite(savedCap) ? savedCap : DEFAULT_VIEWPORT_CAP);
+viewportCap.subscribe(v => localStorage.setItem(VIEWPORT_CAP_KEY, String(v)));
+
+// { shownText, enabledCount, totalThemes, viewportText, totalRendered }
+export const viewportStats = writable({ shownText: '-', enabledCount: 0, totalThemes: 0, viewportText: '-', totalRendered: 0 });
 
 // --- Snapview store ---
 // Array of snapview objects, each:
@@ -112,6 +119,11 @@ export function checkSnapviewComplete(snapviewId) {
 // Get a snapview by id
 export function getSnapview(snapviewId) {
   return get(snapviews).find(s => s.id === snapviewId) || null;
+}
+
+// Delete a snapview by id
+export function deleteSnapview(snapviewId) {
+  snapviews.update(list => list.filter(sv => sv.id !== snapviewId));
 }
 
 // Sorted snapviews (newest first) — replaces the old groupedSnapviews

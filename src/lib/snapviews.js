@@ -18,6 +18,9 @@ export function initSnapviewsLayer() {
 
   // Subscribe to store changes and sync map overlays
   snapviewsStore.subscribe(list => syncMapOverlays(list));
+
+  // On zoom/pan, update tooltip visibility (hide when rect fits in viewport)
+  map.on('moveend', () => updateTooltipVisibility());
 }
 
 function storageKey() {
@@ -32,13 +35,60 @@ export function setSnapviewRelease(release) {
 function loadSnapviewsFromStorage() {
   try {
     const raw = JSON.parse(localStorage.getItem(storageKey()) || '[]');
-    // Migrate old format: if entries have 'key' instead of 'keys', convert
     const migrated = raw.map(sv => {
-      if (sv.keys) return sv; // already new format
-      // Old format: { key, bbox, ... } — skip, can't migrate meaningfully
+      if (sv.id && sv.keys) return sv; // already new format
+
+      // Migrate old format: { key, bbox, loadTimeMs, rowCount, fileCount, ts, ... }
+      if (sv.key && sv.bbox) {
+        return {
+          id: sv.ts?.toString(36) || Date.now().toString(36) + Math.random().toString(36).slice(2),
+          bbox: sv.bbox,
+          keys: [sv.key],
+          status: 'done',
+          progress: { loaded: 1, total: 1, currentKey: null },
+          themeStats: {
+            [sv.key]: {
+              status: 'done',
+              rowCount: sv.rowCount || 0,
+              fileCount: sv.fileCount || 0,
+              loadTimeMs: sv.loadTimeMs || 0,
+            },
+          },
+          ts: sv.ts || Date.now(),
+          totalTimeMs: sv.loadTimeMs || 0,
+          totalRows: sv.rowCount || 0,
+          totalFiles: sv.fileCount || 0,
+        };
+      }
       return null;
     }).filter(Boolean);
-    snapviewsStore.set(migrated);
+
+    // Merge old-format entries that share the same bbox into single snapviews
+    const byBbox = new Map();
+    const merged = [];
+    for (const sv of migrated) {
+      if (sv.keys.length === 1 && !sv._merged) {
+        const bk = [sv.bbox.xmin, sv.bbox.ymin, sv.bbox.xmax, sv.bbox.ymax].map(n => n.toFixed(5)).join(',');
+        if (byBbox.has(bk)) {
+          const target = byBbox.get(bk);
+          if (!target.keys.includes(sv.keys[0])) {
+            target.keys.push(sv.keys[0]);
+            target.themeStats[sv.keys[0]] = sv.themeStats[sv.keys[0]];
+            target.progress.total = target.keys.length;
+            target.progress.loaded = target.keys.length;
+            target.totalTimeMs += sv.totalTimeMs || 0;
+            target.totalRows += sv.totalRows || 0;
+            target.totalFiles += sv.totalFiles || 0;
+            if (sv.ts > target.ts) target.ts = sv.ts;
+          }
+          continue;
+        }
+        byBbox.set(bk, sv);
+      }
+      merged.push(sv);
+    }
+
+    snapviewsStore.set(merged);
   } catch {
     snapviewsStore.set([]);
   }
@@ -143,6 +193,34 @@ function getTooltipContent(sv) {
   return `${keys}${rows ? ' \u00b7 ' + rows : ''}`;
 }
 
+// Check if a snapview bbox fits entirely within the current map viewport
+function isFullyVisible(bbox) {
+  const map = getMap();
+  const mapBounds = map.getBounds();
+  return mapBounds.contains(L.latLngBounds(
+    [bbox.ymin, bbox.xmin],
+    [bbox.ymax, bbox.xmax],
+  ));
+}
+
+function updateTooltipVisibility() {
+  for (const [id, overlay] of overlays) {
+    if (!overlay.sv) continue;
+    const sv = overlay.sv;
+    const visible = isFullyVisible(sv.bbox);
+
+    if (sv.status === 'loading') {
+      // Loading: permanent tooltip, but hide if rect fits in viewport
+      if (visible) {
+        overlay.rect.closeTooltip();
+      } else {
+        overlay.rect.openTooltip();
+      }
+    }
+    // done/error: hover only, Leaflet handles it
+  }
+}
+
 function syncMapOverlays(list) {
   if (!snapviewsLayer || !showSnapviews) return;
 
@@ -163,18 +241,34 @@ function syncMapOverlays(list) {
     const bounds = [[sv.bbox.ymin, sv.bbox.xmin], [sv.bbox.ymax, sv.bbox.xmax]];
     const style = getStatusStyle(sv);
     const content = getTooltipContent(sv);
+    const permanent = sv.status === 'loading';
 
     const existing = overlays.get(sv.id);
     if (existing) {
-      // Update style and tooltip
+      existing.sv = sv;
       existing.rect.setStyle(style);
-      existing.tooltip.setContent(content);
+
+      // If permanence changed (loading → done), rebind tooltip
+      if (existing.permanent !== permanent) {
+        existing.rect.unbindTooltip();
+        const tooltip = L.tooltip({
+          permanent,
+          direction: 'center',
+          className: 'snapview-label',
+        });
+        tooltip.setContent(content);
+        existing.rect.bindTooltip(tooltip);
+        existing.tooltip = tooltip;
+        existing.permanent = permanent;
+      } else {
+        existing.tooltip.setContent(content);
+      }
     } else {
       // Create new
       const rect = L.rectangle(bounds, style);
 
       const tooltip = L.tooltip({
-        permanent: true,
+        permanent,
         direction: 'center',
         className: 'snapview-label',
       });
@@ -186,7 +280,10 @@ function syncMapOverlays(list) {
       });
 
       rect.addTo(snapviewsLayer);
-      overlays.set(sv.id, { rect, tooltip });
+      overlays.set(sv.id, { rect, tooltip, sv, permanent });
     }
   }
+
+  // Update visibility after syncing
+  updateTooltipVisibility();
 }
