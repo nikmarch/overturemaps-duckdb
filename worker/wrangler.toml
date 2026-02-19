@@ -1,3 +1,9 @@
 name = "overture-s3-proxy"
 main = "index.js"
 compatibility_date = "2024-01-01"
+
+# Durable Objects used to exist in this project (SpatialIndex).
+# We removed DOs; this migration deletes the old sqlite DO class in Cloudflare.
+[[migrations]]
+tag = "v2"
+deleted_sqlite_classes = ["SpatialIndex"]
