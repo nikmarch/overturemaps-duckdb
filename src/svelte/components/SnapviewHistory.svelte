@@ -1,6 +1,7 @@
 <script>
-  import { groupedSnapviews, activeSnapview } from '../../lib/stores.js';
+  import { sortedSnapviews, activeSnapview } from '../../lib/stores.js';
   import { restoreSnapview } from '../../lib/controller.js';
+  import { getThemeColor } from '../../lib/themes.js';
 
   function formatTs(ms) {
     const d = new Date(ms);
@@ -15,38 +16,79 @@
     return `${(ms / 1000).toFixed(1)}s`;
   }
 
-  function isActive(group) {
-    const a = $activeSnapview;
-    if (!a) return false;
-    return a.bbox.xmin === group.bbox.xmin && a.bbox.ymin === group.bbox.ymin &&
-           a.bbox.xmax === group.bbox.xmax && a.bbox.ymax === group.bbox.ymax;
+  function shortKeys(keys) {
+    return keys.map(k => k.split('/')[1]).join(', ');
+  }
+
+  function progressPct(sv) {
+    if (!sv.progress || sv.progress.total === 0) return 0;
+    return (sv.progress.loaded / sv.progress.total) * 100;
+  }
+
+  function progressText(sv) {
+    if (!sv.progress) return '';
+    const p = sv.progress;
+    const currentType = p.currentKey ? p.currentKey.split('/')[1] : '';
+    const ts = sv.themeStats[p.currentKey];
+    let fileInfo = '';
+    if (ts && ts.filesTotal) {
+      fileInfo = ` (${ts.filesLoaded || 0}/${ts.filesTotal} files)`;
+    }
+    return `Loading ${currentType}${fileInfo}`;
+  }
+
+  function statsText(sv) {
+    const parts = [];
+    if (sv.totalRows != null) parts.push(`${sv.totalRows.toLocaleString()} rows`);
+    if (sv.totalFiles != null && sv.totalFiles > 0) parts.push(`${sv.totalFiles} files`);
+    return parts.join(' \u00b7 ');
   }
 </script>
 
-{#if $groupedSnapviews.length > 0}
+{#if $sortedSnapviews.length > 0}
   <details class="snapview-section" open>
     <summary class="snapview-header">
       Snapviews
-      <span class="snapview-badge">{$groupedSnapviews.length}</span>
+      <span class="snapview-badge">{$sortedSnapviews.length}</span>
     </summary>
     <div class="snapview-list">
-      {#each $groupedSnapviews as group}
+      {#each $sortedSnapviews as sv (sv.id)}
         <button
           class="snapview-item"
-          class:active={isActive(group)}
-          onclick={() => restoreSnapview(group)}
-          title="Restore {group.keys.length} theme(s) at this viewport"
+          class:active={$activeSnapview === sv.id}
+          class:loading={sv.status === 'loading'}
+          class:error={sv.status === 'error'}
+          onclick={() => restoreSnapview(sv)}
+          title="{sv.keys.length} theme(s) — {sv.status}"
         >
           <div class="snapview-dots">
-            {#each group.entries.slice(0, 4) as sv}
-              <span class="snapview-dot" style="background: {sv.color?.fill || '#999'};"></span>
+            {#each sv.keys.slice(0, 4) as key}
+              {@const color = getThemeColor(key)}
+              <span
+                class="snapview-dot"
+                class:pulse={sv.status === 'loading'}
+                style="background: {color?.fill || '#999'};"
+              ></span>
             {/each}
           </div>
           <span class="snapview-info">
-            <span class="snapview-keys">{group.keys.join(', ')}</span>
-            <span class="snapview-stats">
-              {group.totalRows.toLocaleString()} rows &middot; {formatDuration(group.totalTimeMs)} &middot; {formatTs(group.ts)}
-            </span>
+            <span class="snapview-keys">{shortKeys(sv.keys)}</span>
+
+            {#if sv.status === 'loading'}
+              <div class="snapview-progress">
+                <div class="snapview-progress-bar" style="width: {progressPct(sv)}%"></div>
+                <span class="snapview-progress-text">
+                  {sv.progress.loaded}/{sv.progress.total} themes
+                </span>
+              </div>
+              <span class="snapview-loading-detail">{progressText(sv)}</span>
+            {:else if sv.status === 'error'}
+              <span class="snapview-error-text">Error: {sv.error || 'unknown'}</span>
+            {:else}
+              <span class="snapview-stats">
+                {statsText(sv)} &middot; {formatDuration(sv.totalTimeMs)} &middot; {formatTs(sv.ts)}
+              </span>
+            {/if}
           </span>
         </button>
       {/each}
@@ -75,7 +117,7 @@
     display: none;
   }
   .snapview-header::before {
-    content: '▸';
+    content: '\25B8';
     font-size: 10px;
     transition: transform 0.15s;
   }
@@ -121,6 +163,14 @@
     background: #e8f4fd;
     border-color: #b3d9f2;
   }
+  .snapview-item.loading {
+    border-color: #ffc107;
+    background: #fffcf0;
+  }
+  .snapview-item.error {
+    border-color: #e74c3c;
+    background: #fdf2f2;
+  }
   .snapview-dots {
     display: flex;
     flex-direction: column;
@@ -131,6 +181,9 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
+  }
+  .snapview-dot.pulse {
+    animation: pulse-dot 1.2s ease-in-out infinite;
   }
   .snapview-info {
     display: flex;
@@ -151,5 +204,48 @@
     font-size: 10px;
     font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
     white-space: nowrap;
+  }
+  .snapview-loading-detail {
+    color: #856404;
+    font-size: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .snapview-error-text {
+    color: #e74c3c;
+    font-size: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .snapview-progress {
+    position: relative;
+    height: 12px;
+    background: #e9ecef;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 2px;
+  }
+  .snapview-progress-bar {
+    height: 100%;
+    background: #ffc107;
+    border-radius: 3px;
+    transition: width 0.3s;
+  }
+  .snapview-progress-text {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    font-weight: 600;
+    color: #333;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.8); }
   }
 </style>

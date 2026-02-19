@@ -1,17 +1,23 @@
 import L from 'leaflet';
 import { getMap } from './map.js';
 import { snapviews as snapviewsStore } from './stores.js';
+import { getThemeColor } from './themes.js';
 
 const SNAPVIEWS_KEY_PREFIX = `overture_snapviews_${location.origin}`;
-let snapviews = [];
 let snapviewsLayer = null;
 let showSnapviews = true;
 let currentRelease = null;
+
+// Live Leaflet objects: Map<snapviewId, { rect, tooltip }>
+const overlays = new Map();
 
 export function initSnapviewsLayer() {
   const map = getMap();
   snapviewsLayer = L.layerGroup();
   snapviewsLayer.addTo(map);
+
+  // Subscribe to store changes and sync map overlays
+  snapviewsStore.subscribe(list => syncMapOverlays(list));
 }
 
 function storageKey() {
@@ -20,88 +26,167 @@ function storageKey() {
 
 export function setSnapviewRelease(release) {
   currentRelease = release;
-  loadSnapviews();
-  renderSnapviews();
+  loadSnapviewsFromStorage();
 }
 
-function loadSnapviews() {
+function loadSnapviewsFromStorage() {
   try {
-    snapviews = JSON.parse(localStorage.getItem(storageKey()) || '[]');
+    const raw = JSON.parse(localStorage.getItem(storageKey()) || '[]');
+    // Migrate old format: if entries have 'key' instead of 'keys', convert
+    const migrated = raw.map(sv => {
+      if (sv.keys) return sv; // already new format
+      // Old format: { key, bbox, ... } — skip, can't migrate meaningfully
+      return null;
+    }).filter(Boolean);
+    snapviewsStore.set(migrated);
   } catch {
-    snapviews = [];
+    snapviewsStore.set([]);
   }
-  snapviewsStore.set(snapviews);
 }
 
-function saveSnapviews() {
-  localStorage.setItem(storageKey(), JSON.stringify(snapviews));
-  snapviewsStore.set(snapviews);
+export function saveSnapviews(list) {
+  localStorage.setItem(storageKey(), JSON.stringify(list));
 }
 
-export function addSnapview({ key, bbox, limit, cached, color, loadTimeMs, rowCount, fileCount }) {
-  const sv = { key, bbox, limit, cached: !!cached, color, loadTimeMs, rowCount, fileCount, ts: Date.now() };
-  snapviews.unshift(sv);
-  snapviews = snapviews.slice(0, 50);
-  saveSnapviews();
-  renderSnapviews();
-}
+// Auto-persist on changes
+snapviewsStore.subscribe(list => {
+  if (currentRelease) saveSnapviews(list);
+});
 
 export function clearSnapviews() {
-  snapviews = [];
-  localStorage.removeItem(storageKey());
   snapviewsStore.set([]);
-  renderSnapviews();
+  localStorage.removeItem(storageKey());
 }
 
 export function setShowSnapviews(v) {
   showSnapviews = !!v;
-  renderSnapviews();
-}
-
-export function renderSnapviews() {
   if (!snapviewsLayer) return;
-  snapviewsLayer.clearLayers();
-  if (!showSnapviews) return;
-
-  const map = getMap();
-
-  for (const sv of snapviews) {
-    const { bbox, color, cached } = sv;
-    const bounds = [[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]];
-    const rect = L.rectangle(bounds, {
-      color: color?.stroke || '#000',
-      weight: 1.3,
-      fillColor: color?.fill || '#000',
-      fillOpacity: cached ? 0.015 : 0.04,
-      dashArray: cached ? '2 6' : '6 6',
-      interactive: true,
-    });
-
-    const formatTs = (ms) => new Date(ms).toLocaleString();
-
-    rect.bindPopup(
-      `<b>${sv.key}</b>` +
-      `<br><small>${cached ? 'cached query' : 'fresh load'}</small>` +
-      `<br><small>limit: ${Number(sv.limit).toLocaleString()}</small>` +
-      `<br><small>time: ${formatTs(sv.ts)}</small>` +
-      `<br><a href="javascript:void(0)" class="zoom-to">zoom to viewport</a>`
-    );
-
-    rect.on('popupopen', (e) => {
-      const el = e.popup.getElement();
-      const a = el && el.querySelector('a.zoom-to');
-      if (!a) return;
-      a.onclick = (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        map.fitBounds(bounds, { padding: [0, 0] });
-      };
-    });
-
-    rect.addTo(snapviewsLayer);
+  if (!showSnapviews) {
+    snapviewsLayer.clearLayers();
+    overlays.clear();
+  } else {
+    // Re-sync
+    let list;
+    snapviewsStore.subscribe(l => { list = l; })();
+    syncMapOverlays(list || []);
   }
 }
 
-export function listSnapviews() {
-  return snapviews;
+function getSnapviewColor(sv) {
+  // Use the first theme's color
+  if (sv.keys.length > 0) {
+    const c = getThemeColor(sv.keys[0]);
+    return c;
+  }
+  return { fill: '#888', stroke: '#666' };
+}
+
+function getStatusStyle(sv) {
+  const color = getSnapviewColor(sv);
+  switch (sv.status) {
+    case 'loading':
+      return {
+        color: color.stroke,
+        weight: 1.5,
+        fillColor: color.fill,
+        fillOpacity: 0.06,
+        dashArray: '6 4',
+        interactive: true,
+      };
+    case 'done':
+      return {
+        color: color.stroke,
+        weight: 1.3,
+        fillColor: color.fill,
+        fillOpacity: 0.03,
+        dashArray: null,
+        interactive: true,
+      };
+    case 'error':
+      return {
+        color: '#e74c3c',
+        weight: 1.5,
+        fillColor: '#e74c3c',
+        fillOpacity: 0.04,
+        dashArray: '6 4',
+        interactive: true,
+      };
+    default:
+      return {
+        color: color.stroke,
+        weight: 1,
+        fillColor: color.fill,
+        fillOpacity: 0.02,
+        interactive: true,
+      };
+  }
+}
+
+function getTooltipContent(sv) {
+  if (sv.status === 'loading') {
+    const p = sv.progress;
+    const currentType = p.currentKey ? p.currentKey.split('/')[1] : '';
+    // Show file-level progress if available for current key
+    const ts = sv.themeStats[p.currentKey];
+    let fileInfo = '';
+    if (ts && ts.filesTotal) {
+      fileInfo = ` (${ts.filesLoaded || 0}/${ts.filesTotal} files)`;
+    }
+    return `Loading ${p.loaded}/${p.total}${currentType ? ' \u00b7 ' + currentType : ''}${fileInfo}`;
+  }
+  if (sv.status === 'error') {
+    return `Error: ${sv.error || 'unknown'}`;
+  }
+  // done
+  const rows = sv.totalRows != null ? sv.totalRows.toLocaleString() + ' rows' : '';
+  const keys = sv.keys.map(k => k.split('/')[1]).join(', ');
+  return `${keys}${rows ? ' \u00b7 ' + rows : ''}`;
+}
+
+function syncMapOverlays(list) {
+  if (!snapviewsLayer || !showSnapviews) return;
+
+  const map = getMap();
+  const currentIds = new Set(list.map(sv => sv.id));
+
+  // Remove overlays for snapviews that no longer exist
+  for (const [id, overlay] of overlays) {
+    if (!currentIds.has(id)) {
+      snapviewsLayer.removeLayer(overlay.rect);
+      overlays.delete(id);
+    }
+  }
+
+  // Add or update overlays
+  for (const sv of list) {
+    if (!sv.id || !sv.bbox) continue;
+    const bounds = [[sv.bbox.ymin, sv.bbox.xmin], [sv.bbox.ymax, sv.bbox.xmax]];
+    const style = getStatusStyle(sv);
+    const content = getTooltipContent(sv);
+
+    const existing = overlays.get(sv.id);
+    if (existing) {
+      // Update style and tooltip
+      existing.rect.setStyle(style);
+      existing.tooltip.setContent(content);
+    } else {
+      // Create new
+      const rect = L.rectangle(bounds, style);
+
+      const tooltip = L.tooltip({
+        permanent: true,
+        direction: 'center',
+        className: 'snapview-label',
+      });
+      tooltip.setContent(content);
+      rect.bindTooltip(tooltip);
+
+      rect.on('click', () => {
+        map.fitBounds(bounds, { padding: [0, 0] });
+      });
+
+      rect.addTo(snapviewsLayer);
+      overlays.set(sv.id, { rect, tooltip });
+    }
+  }
 }

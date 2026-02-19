@@ -1,7 +1,6 @@
-import { get } from 'svelte/store';
 import { PROXY } from './constants.js';
 import { dropAllTables } from './duckdb.js';
-import { getMap, getBbox, getViewportString, bboxContains } from './map.js';
+import { getMap, getBbox, getViewportString } from './map.js';
 import {
   onReleaseChange, toggleTheme, setThemeLimit,
   themeState, currentRelease,
@@ -17,147 +16,120 @@ import {
   showSnapviews as showSnapviewsStore,
   highlightIntersections as highlightIntersectionsStore,
   activeSnapview as activeSnapviewStore,
-  groupedSnapviews as groupedSnapviewsStore,
+  snapviews as snapviewsStore,
+  createSnapview,
+  addSnapviewKey,
+  removeSnapviewKey,
+  getSnapview,
+  updateSnapviewTheme,
+  checkSnapviewComplete,
 } from './stores.js';
+import { get } from 'svelte/store';
 
 export { onReleaseChange as setRelease };
 export { toggleTheme };
 export { setThemeLimit };
 
-// Flag to skip auto-sync while a manual load is in progress
-let manualLoadInProgress = false;
+// The currently active snapview id
+let activeSnapviewId = null;
 
-export function updateViewportStats() {
+function bboxKey(bbox) {
+  return [bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax].map(n => n.toFixed(5)).join(',');
+}
+
+// Get or create a snapview for the current bbox
+function getOrCreateActiveSnapview(bbox, keys) {
+  // If there's an active loading snapview at the same bbox, reuse it
+  if (activeSnapviewId) {
+    const sv = getSnapview(activeSnapviewId);
+    if (sv && sv.status === 'loading' && bboxKey(sv.bbox) === bboxKey(bbox)) {
+      // Add any new keys
+      for (const key of keys) {
+        if (!sv.keys.includes(key)) {
+          addSnapviewKey(activeSnapviewId, key);
+        }
+      }
+      return activeSnapviewId;
+    }
+  }
+
+  // Create a new snapview
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  createSnapview(id, bbox, keys);
+  return id;
+}
+
+export function onMapMove() {
   viewportStatsStore.update(s => ({ ...s, viewportText: getViewportString() }));
 }
 
-// Find the snapview group whose bbox contains the current viewport
-function findMatchingSnapview() {
-  const currentBbox = getBbox();
-  const groups = get(groupedSnapviewsStore);
-  for (const group of groups) {
-    if (bboxContains(group.bbox, currentBbox)) {
-      return group;
-    }
-  }
-  return null;
-}
+export function manualToggleTheme(key, enabled) {
+  if (enabled) {
+    const bbox = getBbox();
+    const enabledKeys = Object.keys(themeState).filter(k => themeState[k].enabled);
+    const allKeys = [...enabledKeys, key];
 
-// Sync checked themes to match the snapview at the current viewport
-async function syncThemesToViewport() {
-  if (manualLoadInProgress) return;
+    const svId = getOrCreateActiveSnapview(bbox, allKeys);
+    activeSnapviewId = svId;
+    activeSnapviewStore.set(svId);
 
-  const match = findMatchingSnapview();
-  const currentActive = get(activeSnapviewStore);
-
-  if (match) {
-    // Check if we're already showing this snapview
-    const sameAsCurrent = currentActive &&
-      currentActive.bbox.xmin === match.bbox.xmin && currentActive.bbox.ymin === match.bbox.ymin &&
-      currentActive.bbox.xmax === match.bbox.xmax && currentActive.bbox.ymax === match.bbox.ymax;
-
-    if (sameAsCurrent) return;
-
-    // Switch to the matching snapview
-    const matchKeys = new Set(match.keys);
-
-    // Disable themes not in this snapview
-    for (const key of Object.keys(themeState)) {
-      if (themeState[key].enabled && !matchKeys.has(key)) {
-        disableTheme(key);
-      }
-    }
-
-    // Enable themes from this snapview (renders from DuckDB cache)
-    for (const key of match.keys) {
-      if (themeState[key] && !themeState[key].enabled) {
-        await enableThemeFromCache(key);
-      }
-    }
-
-    activeSnapviewStore.set({ bbox: match.bbox, keys: [...match.keys] });
+    // Fire-and-forget: toggleTheme no longer awaits
+    toggleTheme(key, true, svId);
   } else {
-    // No snapview matches — disable all themes
-    if (currentActive) {
-      for (const key of Object.keys(themeState)) {
-        if (themeState[key].enabled) {
-          disableTheme(key);
-        }
-      }
+    toggleTheme(key, false);
+
+    // Update active snapview keys
+    if (activeSnapviewId) {
+      removeSnapviewKey(activeSnapviewId, key);
+    }
+
+    const enabledKeys = Object.keys(themeState).filter(k => themeState[k].enabled);
+    if (enabledKeys.length === 0) {
+      activeSnapviewId = null;
       activeSnapviewStore.set(null);
     }
   }
 }
 
-export function onMapMove() {
-  updateViewportStats();
-  syncThemesToViewport();
-}
-
-export function onHashChange() {
-  // The map listens to hashchange internally via Leaflet, which fires moveend.
-  // But if the hash changes without Leaflet (e.g. browser back/forward),
-  // we need to update the map position, which will trigger moveend → onMapMove.
+export async function restoreSnapview(snapview) {
   const map = getMap();
-  if (!map) return;
-  const [z, lat, lon] = (location.hash.slice(1) || '').split('/').map(Number);
-  if (!isNaN(lat) && !isNaN(lon)) {
-    map.setView([lat, lon], !isNaN(z) ? z : map.getZoom());
-  }
-}
+  const { bbox, keys } = snapview;
 
-export async function restoreSnapview(group) {
-  manualLoadInProgress = true;
-  try {
-    const map = getMap();
-    const { bbox, keys } = group;
-
-    // Disable all currently enabled themes
-    for (const key of Object.keys(themeState)) {
-      if (themeState[key].enabled) {
-        disableTheme(key);
-      }
+  // Disable all currently enabled themes
+  for (const key of Object.keys(themeState)) {
+    if (themeState[key].enabled) {
+      disableTheme(key);
     }
-
-    activeSnapviewStore.set({ bbox, keys: [...keys] });
-
-    // Zoom to the snapview bbox
-    map.fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [0, 0] });
-    await new Promise(r => setTimeout(r, 100));
-
-    // Enable all themes from this snapview (from cache)
-    for (const key of keys) {
-      if (themeState[key]) {
-        await enableThemeFromCache(key);
-      }
-    }
-  } finally {
-    manualLoadInProgress = false;
   }
-}
 
-// Wraps toggleTheme to set manualLoadInProgress flag
-export async function manualToggleTheme(key, enabled) {
-  manualLoadInProgress = true;
-  try {
-    await toggleTheme(key, enabled);
-  } finally {
-    manualLoadInProgress = false;
-    // After manual load completes, the new snapview exists at this viewport,
-    // so re-sync to pick it up as active
-    syncThemesToViewport();
+  activeSnapviewId = snapview.id;
+  activeSnapviewStore.set(snapview.id);
+
+  // Zoom to the snapview bbox
+  map.fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [0, 0] });
+
+  // Wait for the map to settle
+  await new Promise(r => setTimeout(r, 100));
+
+  // Enable all themes from this snapview (from DuckDB cache)
+  const validKeys = keys.filter(k => themeState[k]);
+  for (let i = 0; i < validKeys.length; i++) {
+    await enableThemeFromCache(validKeys[i], bbox);
   }
+
+  statusStore.set({ text: `Restored ${validKeys.length} theme${validKeys.length > 1 ? 's' : ''}`, type: 'success' });
 }
 
 export async function clearCache() {
   if (!currentRelease) return;
 
-  if (!confirm('Clear cache? This will:\n• clear snapviews (localStorage)\n• drop local DuckDB tables\n• clear edge spatial index for all themes')) {
+  if (!confirm('Clear cache? This will:\n\u2022 clear snapviews (localStorage)\n\u2022 drop local DuckDB tables\n\u2022 clear edge spatial index for all themes')) {
     return;
   }
 
   statusStore.set({ text: 'Clearing cache...', type: 'loading' });
 
+  activeSnapviewId = null;
   activeSnapviewStore.set(null);
 
   clearSnapviews();

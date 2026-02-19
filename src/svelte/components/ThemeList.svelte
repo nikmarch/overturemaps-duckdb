@@ -7,8 +7,8 @@
     return `${t.theme}/${t.type}`;
   }
 
-  async function onToggle(key, e) {
-    await manualToggleTheme(key, e.target.checked);
+  function onToggle(key, e) {
+    manualToggleTheme(key, e.target.checked);
   }
 
   function onLimit(key, e) {
@@ -30,15 +30,15 @@
     {@const color = getThemeColor(key)}
     {@const hasStats = ui.rowCount > 0}
 
-    <div class="theme-row" data-key={key} class:loading={ui.loading} class:has-data={hasStats && ui.enabled}>
+    <div class="theme-row" data-key={key} class:loading={ui.loading} class:has-data={hasStats && ui.enabled} class:has-cache={hasStats && !ui.enabled}>
       <label>
         <span class="theme-dot" style="background: {color.fill};"></span>
         <input type="checkbox" checked={ui.enabled} onchange={(e) => onToggle(key, e)} />
         <span class="theme-name" title={key}>{t.type}</span>
       </label>
 
-      {#if hasStats && ui.enabled}
-        <span class="theme-stats">
+      {#if hasStats}
+        <span class="theme-stats" class:dimmed={!ui.enabled}>
           {ui.rowCount.toLocaleString()}
           <span class="theme-stats-sep">&middot;</span>
           {formatDuration(ui.loadTimeMs)}

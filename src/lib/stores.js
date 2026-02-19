@@ -1,4 +1,4 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 
 export const status = writable({ text: 'Initializing...', type: 'loading' });
 
@@ -17,34 +17,107 @@ export const highlightIntersections = writable(false);
 // { shownText, enabledCount, totalThemes, viewportText }
 export const viewportStats = writable({ shownText: '-', enabledCount: 0, totalThemes: 0, viewportText: '-' });
 
-// Snapview history entries (raw)
+// --- Snapview store ---
+// Array of snapview objects, each:
+// { id, bbox, keys, status, progress, themeStats, ts, totalTimeMs, totalRows, totalFiles }
 export const snapviews = writable([]);
 
-// Active snapview restoration: { bbox, keys: Set<string> } | null
+// Active snapview id (string | null)
 export const activeSnapview = writable(null);
 
-// Grouped snapviews: [{ bboxKey, bbox, entries: [...], keys: [...], ts }]
-export const groupedSnapviews = derived(snapviews, ($snapviews) => {
-  const groups = new Map();
-  for (const sv of $snapviews) {
-    const bk = bboxKey(sv.bbox);
-    if (!groups.has(bk)) {
-      groups.set(bk, { bboxKey: bk, bbox: sv.bbox, entries: [], keys: [], ts: sv.ts, totalTimeMs: 0, totalRows: 0, totalFiles: 0 });
-    }
-    const g = groups.get(bk);
-    g.entries.push(sv);
-    if (!g.keys.includes(sv.key)) g.keys.push(sv.key);
-    if (sv.ts > g.ts) g.ts = sv.ts;
-    g.totalTimeMs += sv.loadTimeMs || 0;
-    g.totalRows += sv.rowCount || 0;
-    g.totalFiles += sv.fileCount || 0;
-  }
-  return [...groups.values()];
-});
-
-function bboxKey(bbox) {
-  return [bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax].map(n => n.toFixed(5)).join(',');
+// Create a new snapview with status 'loading'
+export function createSnapview(id, bbox, keys) {
+  const sv = {
+    id,
+    bbox,
+    keys: [...keys],
+    status: 'loading',
+    progress: { loaded: 0, total: keys.length, currentKey: null },
+    themeStats: {},
+    ts: Date.now(),
+    totalTimeMs: null,
+    totalRows: null,
+    totalFiles: null,
+  };
+  snapviews.update(list => [sv, ...list].slice(0, 50));
+  return sv;
 }
+
+// Update one theme's stats within a snapview
+export function updateSnapviewTheme(snapviewId, key, patch) {
+  snapviews.update(list => list.map(sv => {
+    if (sv.id !== snapviewId) return sv;
+    const themeStats = { ...sv.themeStats, [key]: { ...(sv.themeStats[key] || {}), ...patch } };
+    const loaded = Object.values(themeStats).filter(t => t.status === 'done').length;
+    const progress = { loaded, total: sv.keys.length, currentKey: key };
+    return { ...sv, themeStats, progress };
+  }));
+}
+
+// Add a key to an existing snapview (when user toggles another theme while loading)
+export function addSnapviewKey(snapviewId, key) {
+  snapviews.update(list => list.map(sv => {
+    if (sv.id !== snapviewId) return sv;
+    if (sv.keys.includes(key)) return sv;
+    const keys = [...sv.keys, key];
+    const progress = { ...sv.progress, total: keys.length };
+    return { ...sv, keys, progress };
+  }));
+}
+
+// Remove a key from an existing snapview
+export function removeSnapviewKey(snapviewId, key) {
+  snapviews.update(list => list.map(sv => {
+    if (sv.id !== snapviewId) return sv;
+    const keys = sv.keys.filter(k => k !== key);
+    const themeStats = { ...sv.themeStats };
+    delete themeStats[key];
+    const loaded = Object.values(themeStats).filter(t => t.status === 'done').length;
+    const progress = { loaded, total: keys.length, currentKey: sv.progress.currentKey };
+    return { ...sv, keys, themeStats, progress };
+  }));
+}
+
+// Finalize a snapview: set status 'done', compute totals
+export function finalizeSnapview(snapviewId) {
+  snapviews.update(list => list.map(sv => {
+    if (sv.id !== snapviewId) return sv;
+    let totalRows = 0, totalFiles = 0, totalTimeMs = 0;
+    for (const t of Object.values(sv.themeStats)) {
+      totalRows += t.rowCount || 0;
+      totalFiles += t.fileCount || 0;
+      totalTimeMs += t.loadTimeMs || 0;
+    }
+    return { ...sv, status: 'done', totalRows, totalFiles, totalTimeMs };
+  }));
+}
+
+// Mark a snapview as errored
+export function failSnapview(snapviewId, error) {
+  snapviews.update(list => list.map(sv => {
+    if (sv.id !== snapviewId) return sv;
+    return { ...sv, status: 'error', error: error?.message || String(error) };
+  }));
+}
+
+// Check if all themes in a snapview are done, if so finalize it
+export function checkSnapviewComplete(snapviewId) {
+  const list = get(snapviews);
+  const sv = list.find(s => s.id === snapviewId);
+  if (!sv || sv.status !== 'loading') return;
+  const allDone = sv.keys.every(k => sv.themeStats[k]?.status === 'done');
+  if (allDone) finalizeSnapview(snapviewId);
+}
+
+// Get a snapview by id
+export function getSnapview(snapviewId) {
+  return get(snapviews).find(s => s.id === snapviewId) || null;
+}
+
+// Sorted snapviews (newest first) — replaces the old groupedSnapviews
+export const sortedSnapviews = derived(snapviews, ($snapviews) => {
+  return [...$snapviews].sort((a, b) => b.ts - a.ts);
+});
 
 export const themeList = derived(themes, ($themes) => {
   return [...$themes].sort((a, b) => `${a.theme}/${a.type}`.localeCompare(`${b.theme}/${b.type}`));
