@@ -76,7 +76,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin-top: 12px;
+  margin-top: 8px;
 }
 #controlsBody.collapsed { display: none; }
 
@@ -165,16 +165,23 @@ button {
 button:hover:not(:disabled) { background: #0056b3; transform: translateY(-1px); }
 button:disabled { background: #ccc; cursor: not-allowed; }
 
-.btn-row {
-  display: flex;
-}
-
-#clearCacheBtn {
+.clear-cache-btn {
+  margin-top: 16px;
   width: 100%;
-  background: #6c757d;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  background: transparent;
+  color: #aaa;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
 }
-
-#clearCacheBtn:hover:not(:disabled) { background: #5a6268; }
+.clear-cache-btn:hover:not(:disabled) {
+  background: #f8f9fa;
+  color: #888;
+  border-color: #ccc;
+  transform: none;
+}
 
 .select-row {
   display: flex;
@@ -270,6 +277,20 @@ button:disabled { background: #ccc; cursor: not-allowed; }
   color: #999;
   white-space: nowrap;
   flex-shrink: 0;
+}
+.theme-stats {
+  font-size: 10px;
+  color: #555;
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.theme-stats-sep {
+  color: #ccc;
+  margin: 0 1px;
+}
+.theme-row.has-data {
+  background: #f0faf4;
 }
 .theme-limit {
   width: 70px;
