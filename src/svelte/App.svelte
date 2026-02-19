@@ -1,3 +1,10 @@
+<script>
+  import ReleaseSelect from './components/ReleaseSelect.svelte';
+  import ThemeList from './components/ThemeList.svelte';
+  import { clearCache, setShowFootprints, setHighlightIntersections } from '../lib/controller.js';
+  import { showFootprints, highlightIntersections } from '../lib/stores.js';
+</script>
+
 <div id="map"></div>
 <div id="controls">
   <div id="controlsHeader">
@@ -15,17 +22,21 @@
 
   <div id="controlsBody">
     <div class="btn-row">
-      <button id="clearCacheBtn">Clear cache</button>
+      <button id="clearCacheBtn" on:click={clearCache}>Clear cache</button>
     </div>
 
-    <div class="release-row">
-      <label for="releaseSelect">Release</label>
-      <select id="releaseSelect"></select>
-    </div>
+    <ReleaseSelect />
 
-    <label class="checkbox-row"><input type="checkbox" id="footprintsCheck" checked> show footprints</label>
-    <label class="checkbox-row"><input type="checkbox" id="intersectionsCheck"> highlight intersections (points)</label>
+    <label class="checkbox-row">
+      <input type="checkbox" bind:checked={$showFootprints} on:change={(e) => setShowFootprints(e.target.checked)}>
+      show footprints
+    </label>
 
-    <div id="themeList"></div>
+    <label class="checkbox-row">
+      <input type="checkbox" bind:checked={$highlightIntersections} on:change={(e) => setHighlightIntersections(e.target.checked)}>
+      highlight intersections (points)
+    </label>
+
+    <ThemeList />
   </div>
 </div>

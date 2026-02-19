@@ -10,8 +10,16 @@ import {
 // For now it delegates to functions exposed on window by the legacy code (to keep changes small).
 
 export async function init() {
-  // legacy init will run on import; we just sync initial UI state.
-  // If/when we fully modularize, this function will own initialization.
+  // Allow legacy code to push updates into Svelte without importing Svelte.
+  window.__uiSetStatus = (next) => status.set(next);
+  window.__uiSetStats = (next) => stats.set(next);
+  window.__uiSetReleases = (list) => releases.set(list);
+  window.__uiSetSelectedRelease = (r) => selectedRelease.set(r);
+  window.__uiSetThemes = (list) => themes.set(list);
+  window.__uiUpdateTheme = (key, patch) => {
+    themeUi.update((m) => ({ ...m, [key]: { ...(m[key] || {}), ...patch } }));
+  };
+
   syncFromLegacy();
 }
 

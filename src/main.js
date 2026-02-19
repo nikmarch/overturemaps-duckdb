@@ -167,7 +167,9 @@ function updateStats() {
       shown.push(`${state.markers.length.toLocaleString()} ${type}`);
     }
   }
-  $('shownStats').textContent = shown.length ? shown.join(', ') : '-';
+  const shownText = shown.length ? shown.join(', ') : '-';
+  $('shownStats').textContent = shownText;
+  window.__uiSetStats?.({ cachedText: $('cachedStats')?.textContent || '-', shownText });
 }
 
 function formatTs(ms) {
@@ -249,6 +251,7 @@ function addFootprint({ key, bbox, limit, cached, color }) {
 function log(msg, type = 'loading') {
   $('status').innerHTML = `<div class="spinner"></div><span>${msg}</span>`;
   $('status').className = type;
+  window.__uiSetStatus?.({ text: msg, type });
   updateStats();
 }
 
@@ -269,20 +272,29 @@ function bboxFilter(bbox) {
 async function loadReleases() {
   log('Loading releases...');
   const res = await fetch(`${PROXY}/releases`);
-  const releases = await res.json();
+  const rels = await res.json();
+
+  // Let Svelte own the dropdown.
+  window.__uiSetReleases?.(rels);
+
+  // Back-compat: keep the DOM select in sync if it exists.
   const select = $('releaseSelect');
-  select.innerHTML = '';
-  for (const r of releases) {
-    const opt = document.createElement('option');
-    opt.value = r;
-    opt.textContent = r;
-    select.appendChild(opt);
+  if (select) {
+    select.innerHTML = '';
+    for (const r of rels) {
+      const opt = document.createElement('option');
+      opt.value = r;
+      opt.textContent = r;
+      select.appendChild(opt);
+    }
+    select.disabled = false;
+    select.onchange = () => onReleaseChange(select.value);
   }
-  select.disabled = false;
-  select.onchange = () => onReleaseChange(select.value);
-  if (releases.length > 0) {
-    select.value = releases[0];
-    await onReleaseChange(releases[0]);
+
+  if (rels.length > 0) {
+    window.__uiSetSelectedRelease?.(rels[0]);
+    if (select) select.value = rels[0];
+    await onReleaseChange(rels[0]);
   }
 }
 
@@ -351,6 +363,7 @@ async function clearCache() {
 
 async function onReleaseChange(release) {
   currentRelease = release;
+  window.__uiSetSelectedRelease?.(release);
 
   // Clear all existing theme layers
   for (const key of Object.keys(themeState)) {
@@ -366,13 +379,14 @@ async function onReleaseChange(release) {
   log('Loading themes...');
   const res = await fetch(`${PROXY}/themes?release=${release}`);
   const themes = await res.json();
+  window.__uiSetThemes?.(themes);
   buildThemeUI(themes);
   log('Ready', 'success');
 }
 
 function buildThemeUI(themes) {
   const container = $('themeList');
-  container.innerHTML = '';
+  if (container) container.innerHTML = '';
 
   // Stable order + stable colors.
   const sorted = [...themes].sort((a, b) => (`${a.theme}/${a.type}`).localeCompare(`${b.theme}/${b.type}`));
@@ -425,21 +439,28 @@ function buildThemeUI(themes) {
     limitInput.step = '1000';
     limitInput.dataset.key = key;
 
-    row.appendChild(label);
-    row.appendChild(meta);
-    row.appendChild(limitInput);
-    container.appendChild(row);
+    // Initialize UI state (Svelte-owned). Keep DOM rendering only if container exists.
+    window.__uiUpdateTheme?.(key, { enabled: false, limit: 33000, loading: false, metaText: '' });
 
-    checkbox.onchange = () => onThemeToggle(key, checkbox.checked);
-    limitInput.onchange = () => {
-      themeState[key].limit = parseInt(limitInput.value) || 33000;
-      themeState[key].bbox = null;
-    };
+    if (container) {
+      row.appendChild(label);
+      row.appendChild(meta);
+      row.appendChild(limitInput);
+      container.appendChild(row);
+
+      checkbox.onchange = () => onThemeToggle(key, checkbox.checked);
+      limitInput.onchange = () => {
+        themeState[key].limit = parseInt(limitInput.value) || 33000;
+        themeState[key].bbox = null;
+        window.__uiUpdateTheme?.(key, { limit: themeState[key].limit });
+      };
+    }
   }
 }
 
 async function onThemeToggle(key, enabled) {
   themeState[key].enabled = enabled;
+  window.__uiUpdateTheme?.(key, { enabled });
   if (enabled) {
     await loadTheme(key);
   } else {
@@ -486,6 +507,7 @@ async function loadTheme(key) {
   addFootprint({ key, bbox, limit, cached: useCache, color });
 
   const row = document.querySelector(`.theme-row[data-key="${key}"]`);
+  window.__uiUpdateTheme?.(key, { loading: true });
   if (row) row.classList.add('loading');
 
   state.layer.clearLayers();
@@ -502,8 +524,10 @@ async function loadTheme(key) {
       const filtered = filesRes.headers.get('X-Filtered-Files') || '?';
       const files = fileKeys.map(k => `${location.origin}/${k}`);
 
+      const metaText = `${filtered}/${total}`;
+      window.__uiUpdateTheme?.(key, { metaText });
       const meta = document.querySelector(`.theme-meta[data-key="${key}"]`);
-      if (meta) meta.textContent = `${filtered}/${total}`;
+      if (meta) meta.textContent = metaText;
 
       await conn.query(`DROP TABLE IF EXISTS "${tableName}"`);
 
@@ -584,6 +608,7 @@ async function loadTheme(key) {
     log(`Error loading ${type}: ${e.message}`, 'error');
     console.error(e);
   } finally {
+    window.__uiUpdateTheme?.(key, { loading: false });
     if (row) row.classList.remove('loading');
   }
 }
@@ -873,13 +898,19 @@ async function init() {
     await conn.query('INSTALL spatial; LOAD spatial;');
 
     // UI handlers
-    $('footprintsCheck').onchange = () => renderFootprints();
-    $('intersectionsCheck').onchange = async () => {
-      intersectionMode = $('intersectionsCheck').checked;
-      await recomputeIntersections();
-      rerenderAllEnabledThemes();
-    };
-    $('clearCacheBtn').onclick = clearCache;
+    // UI events are now Svelte-owned; keep legacy wiring as fallback.
+    if ($('footprintsCheck') && !$('footprintsCheck').onchange) {
+      $('footprintsCheck').onchange = () => renderFootprints();
+    }
+    if ($('intersectionsCheck') && !$('intersectionsCheck').onchange) {
+      $('intersectionsCheck').onchange = async () => {
+        intersectionMode = $('intersectionsCheck').checked;
+        await recomputeIntersections();
+        rerenderAllEnabledThemes();
+      };
+    }
+    // clearCache is now wired by Svelte; keep legacy wiring as a fallback.
+    if (!$('clearCacheBtn').onclick) $('clearCacheBtn').onclick = clearCache;
 
     await loadReleases();
   } catch (e) {
@@ -887,5 +918,28 @@ async function init() {
     console.error(e);
   }
 }
+
+// Expose minimal hooks for the Svelte controller.
+window.__setRelease = onReleaseChange;
+window.__toggleTheme = onThemeToggle;
+window.__setThemeLimit = (key, limit) => {
+  if (!themeState[key]) return;
+  themeState[key].limit = Number(limit) || 33000;
+  themeState[key].bbox = null;
+  window.__uiUpdateTheme?.(key, { limit: themeState[key].limit });
+};
+window.__clearCache = clearCache;
+window.__setShowFootprints = (v) => {
+  const el = $('footprintsCheck');
+  if (el) el.checked = !!v;
+  renderFootprints();
+};
+window.__setHighlightIntersections = async (v) => {
+  intersectionMode = !!v;
+  const el = $('intersectionsCheck');
+  if (el) el.checked = !!v;
+  await recomputeIntersections();
+  rerenderAllEnabledThemes();
+};
 
 init();
