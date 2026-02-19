@@ -3,6 +3,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
 #map { height: 100vh; width: 100%; }
 
+/* Intersection cross marker */
+.intersection-cross {
+  background: transparent !important;
+  border: none !important;
+}
+.intersection-cross::before,
+.intersection-cross::after {
+  content: '';
+  position: absolute;
+  background: #e74c3c;
+  border-radius: 1px;
+}
+.intersection-cross::before {
+  width: 2px; height: 12px;
+  top: 0; left: 5px;
+}
+.intersection-cross::after {
+  width: 12px; height: 2px;
+  top: 5px; left: 0;
+}
+
 #controls {
   position: absolute;
   top: 10px;

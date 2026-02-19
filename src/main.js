@@ -813,16 +813,25 @@ function renderFeature(row, state, color, extraFields = []) {
 
   if (geomType.includes('POINT')) {
     if (row.centroid_lat && row.centroid_lon) {
-      leafletObj = L.circleMarker(
-        [Number(row.centroid_lat), Number(row.centroid_lon)],
-        {
-          radius: 6,
-          fillColor: intersects ? '#2ecc71' : color.fill,
-          color: intersects ? '#1e8449' : color.stroke,
-          weight: intersects ? 2.5 : 1.5,
+      const latlng = [Number(row.centroid_lat), Number(row.centroid_lon)];
+      if (intersects) {
+        // Cross marker for intersection points
+        leafletObj = L.marker(latlng, {
+          icon: L.divIcon({
+            className: 'intersection-cross',
+            iconSize: [12, 12],
+            iconAnchor: [6, 6],
+          }),
+        });
+      } else {
+        leafletObj = L.circleMarker(latlng, {
+          radius: 3,
+          fillColor: color.fill,
+          color: color.stroke,
+          weight: 1,
           fillOpacity: 0.95,
-        }
-      );
+        });
+      }
     }
   } else if (geomType.includes('POLYGON')) {
     if (row.geojson) {
