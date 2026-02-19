@@ -127,6 +127,7 @@ const map = L.map('map').setView(
 );
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 footprintsLayer.addTo(map);
+setTimeout(updateViewportStats, 0);
 
 $('collapseBtn').onclick = () => {
   const body = $('controlsBody');
@@ -145,7 +146,15 @@ if (localStorage.getItem('controlsCollapsed') === 'true') {
 map.on('moveend', () => {
   const c = map.getCenter();
   history.replaceState(null, '', `#${map.getZoom()}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`);
+  updateViewportStats();
 });
+
+function updateViewportStats() {
+  const el = $('viewportStats');
+  if (!el) return;
+  const b = map.getBounds();
+  el.textContent = `${b.getSouth().toFixed(2)},${b.getWest().toFixed(2)} → ${b.getNorth().toFixed(2)},${b.getEast().toFixed(2)} z${map.getZoom()}`;
+}
 
 function darkenHex(hex, amount = 0.22) {
   const s = hex.replace('#', '');
@@ -168,7 +177,10 @@ function getThemeColor(key) {
 
 function updateStats() {
   const shown = [];
+  let enabledCount = 0;
+  const totalThemes = Object.keys(themeState).length;
   for (const [key, state] of Object.entries(themeState)) {
+    if (state.enabled) enabledCount++;
     if (state.markers.length > 0) {
       const type = key.split('/')[1];
       shown.push(`${state.markers.length.toLocaleString()} ${type}`);
@@ -176,7 +188,8 @@ function updateStats() {
   }
   const shownText = shown.length ? shown.join(', ') : '-';
   $('shownStats').textContent = shownText;
-  window.__uiSetStats?.({ cachedText: $('cachedStats')?.textContent || '-', shownText });
+  if ($('themesStats')) $('themesStats').textContent = `${enabledCount}/${totalThemes}`;
+  window.__uiSetStats?.({ shownText });
 }
 
 function formatTs(ms) {

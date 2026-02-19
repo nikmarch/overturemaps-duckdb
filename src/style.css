@@ -35,6 +35,21 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
   min-width: 280px;
   max-width: 320px;
+  transition: max-width 0.2s;
+}
+
+@media (min-width: 1200px) {
+  #controls {
+    max-width: 380px;
+    min-width: 340px;
+  }
+}
+
+@media (min-width: 1600px) {
+  #controls {
+    max-width: 440px;
+    min-width: 400px;
+  }
 }
 
 #controlsHeader {
@@ -92,7 +107,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
 #statsBar {
   display: flex;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 6px 14px;
   padding: 8px 12px;
   background: #f0f4f8;
   border-radius: 6px;
@@ -103,12 +119,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   display: flex;
   gap: 4px;
 }
+.stat-wide {
+  display: none;
+}
+@media (min-width: 1200px) {
+  .stat-wide { display: flex; }
+}
 .stat-label {
   color: #666;
 }
-#shownStats {
+#shownStats, #themesStats {
   font-weight: 600;
   color: #333;
+}
+#viewportStats {
+  font-weight: 500;
+  color: #555;
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-size: 11px;
 }
 
 .spinner {
