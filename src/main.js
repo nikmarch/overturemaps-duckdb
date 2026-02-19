@@ -860,7 +860,9 @@ function renderFeature(row, state, color, extraFields = []) {
 
   if (leafletObj) {
     const name = row.display_name || row.id || '?';
-    let popup = `<small style="color:#888">${state.key} &middot; ${geomType}</small>`;
+    const [_theme, _type] = (state.key || '').split('/');
+    const typeLabel = (_type || '').replace(/_/g, ' ');
+    let popup = `<small style="color:#888">${typeLabel} &middot; ${_theme} &middot; ${geomType}</small>`;
     popup += `<br><b>${name}</b>`;
     for (let i = 0; i < extraFields.length; i++) {
       const val = row[`_f${i}`];
