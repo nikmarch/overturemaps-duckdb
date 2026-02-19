@@ -12,7 +12,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
   'Access-Control-Allow-Headers': '*',
   'Access-Control-Expose-Headers':
-    'Content-Length, Content-Range, Accept-Ranges, X-Total-Files, X-Filtered-Files, X-Cache, Retry-After',
+    'Content-Length, Content-Range, Accept-Ranges, X-Total-Files, X-Filtered-Files, X-Cache, X-Index-Status, Retry-After',
 };
 
 export default {
@@ -143,16 +143,24 @@ async function handleFiles(ctx, url, ttl) {
   const hit = await cachedJson(cache, indexKey);
 
   let index;
+  let indexReady = true;
   if (hit) {
     index = hit.data;
   } else {
-    // Build index: list all files + extract bbox from parquet metadata
+    // No cached index – list files and return them all immediately.
+    // Build the bbox index in the background so subsequent requests can filter.
     const files = await listS3Files({ release, theme, type });
-    index = await buildBboxIndex(files);
-    const indexRes = json(index, {
-      headers: { 'Cache-Control': `public, s-maxage=${ttl}` },
-    });
-    ctx.waitUntil(cache.put(indexKey, indexRes));
+    index = Object.fromEntries(files.map(f => [f, { xmin: -180, xmax: 180, ymin: -90, ymax: 90 }]));
+    indexReady = false;
+
+    ctx.waitUntil(
+      buildBboxIndex(files).then(built => {
+        const indexRes = json(built, {
+          headers: { 'Cache-Control': `public, s-maxage=${ttl}` },
+        });
+        return cache.put(indexKey, indexRes);
+      }),
+    );
   }
 
   const xmin = parseFloat(url.searchParams.get('xmin'));
@@ -163,7 +171,7 @@ async function handleFiles(ctx, url, ttl) {
   let files = Object.keys(index);
   const totalFiles = files.length;
 
-  if (!isNaN(xmin) && !isNaN(xmax) && !isNaN(ymin) && !isNaN(ymax)) {
+  if (indexReady && !isNaN(xmin) && !isNaN(xmax) && !isNaN(ymin) && !isNaN(ymax)) {
     files = files.filter(f => {
       const b = index[f];
       return b.xmax >= xmin && b.xmin <= xmax && b.ymax >= ymin && b.ymin <= ymax;
@@ -176,6 +184,7 @@ async function handleFiles(ctx, url, ttl) {
       'X-Total-Files': totalFiles.toString(),
       'X-Filtered-Files': files.length.toString(),
       'X-Cache': hit ? 'HIT' : 'MISS',
+      'X-Index-Status': indexReady ? 'ready' : 'building',
       'Cache-Control': 'no-store',
     },
   });
