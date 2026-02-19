@@ -10,4 +10,4 @@ new_sqlite_classes = ["SpatialIndex"]
 
 [[migrations]]
 tag = "v2"
-deleted_sqlite_classes = ["SpatialIndex"]
+deleted_classes = ["SpatialIndex"]
