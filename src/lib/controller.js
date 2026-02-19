@@ -1,6 +1,6 @@
 import { PROXY } from './constants.js';
 import { dropAllTables } from './duckdb.js';
-import { getMap, getBbox, getViewportString, bboxContains } from './map.js';
+import { getMap, getBbox, getViewportString, bboxContains, lockMap, unlockMap } from './map.js';
 import {
   onReleaseChange, toggleTheme, setThemeLimit,
   themeState, currentRelease,
@@ -11,12 +11,7 @@ import { clearIntersectionState, setIntersectionMode, recomputeIntersections } f
 import { clearSnapviews, setShowSnapviews } from './snapviews.js';
 import { rerenderAllEnabled } from './themes.js';
 import {
-  status as statusStore,
-  viewportStats as viewportStatsStore,
-  showSnapviews as showSnapviewsStore,
-  highlightIntersections as highlightIntersectionsStore,
-  activeSnapview as activeSnapviewStore,
-  snapviews as snapviewsStore,
+  useStore,
   createSnapview,
   addSnapviewKey,
   removeSnapviewKey,
@@ -24,8 +19,8 @@ import {
   deleteSnapview as deleteSnapviewFromStore,
   updateSnapviewTheme,
   checkSnapviewComplete,
-} from './stores.js';
-import { get } from 'svelte/store';
+  updateSnapviewCap,
+} from './store.js';
 
 export { onReleaseChange as setRelease };
 export { toggleTheme };
@@ -40,7 +35,7 @@ function bboxKey(bbox) {
 
 // Find an existing snapview whose bbox contains the current one and already has the key
 function findSupersetSnapview(bbox, key) {
-  const list = get(snapviewsStore);
+  const list = useStore.getState().snapviews;
   for (const sv of list) {
     if ((sv.status === 'done' || sv.status === 'loading') &&
         bboxContains(sv.bbox, bbox) && sv.keys.includes(key)) {
@@ -85,7 +80,7 @@ export function deleteSnapview(snapviewId) {
       }
     }
     activeSnapviewId = null;
-    activeSnapviewStore.set(null);
+    useStore.setState({ activeSnapview: null });
   }
 
   deleteSnapviewFromStore(snapviewId);
@@ -97,15 +92,28 @@ export function loadArea(keys) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
   createSnapview(id, bbox, keys);
   activeSnapviewId = id;
-  activeSnapviewStore.set(id);
+  useStore.setState({ activeSnapview: id });
+
+  lockMap();
 
   for (const key of keys) {
     toggleTheme(key, true, id);
   }
 }
 
+// Watch for snapview completion to unlock the map
+useStore.subscribe(
+  s => s.snapviews,
+  (snapviews) => {
+    const anyLoading = snapviews.some(sv => sv.status === 'loading');
+    if (!anyLoading) unlockMap();
+  },
+);
+
 export function onMapMove() {
-  viewportStatsStore.update(s => ({ ...s, viewportText: getViewportString() }));
+  useStore.setState(s => ({
+    viewportStats: { ...s.viewportStats, viewportText: getViewportString() },
+  }));
 }
 
 export function manualToggleTheme(key, enabled) {
@@ -117,7 +125,7 @@ export function manualToggleTheme(key, enabled) {
     const superset = findSupersetSnapview(bbox, key);
     if (superset && superset.status === 'done') {
       activeSnapviewId = superset.id;
-      activeSnapviewStore.set(superset.id);
+      useStore.setState({ activeSnapview: superset.id });
       // toggleTheme will use cache path (bboxContains check in loadTheme)
       toggleTheme(key, true, superset.id);
       return;
@@ -128,7 +136,7 @@ export function manualToggleTheme(key, enabled) {
 
     const svId = getOrCreateActiveSnapview(bbox, allKeys);
     activeSnapviewId = svId;
-    activeSnapviewStore.set(svId);
+    useStore.setState({ activeSnapview: svId });
 
     // Fire-and-forget: toggleTheme no longer awaits
     toggleTheme(key, true, svId);
@@ -143,7 +151,7 @@ export function manualToggleTheme(key, enabled) {
     const enabledKeys = Object.keys(themeState).filter(k => themeState[k].enabled);
     if (enabledKeys.length === 0) {
       activeSnapviewId = null;
-      activeSnapviewStore.set(null);
+      useStore.setState({ activeSnapview: null });
     }
   }
 }
@@ -160,7 +168,7 @@ export async function restoreSnapview(snapview) {
   }
 
   activeSnapviewId = snapview.id;
-  activeSnapviewStore.set(snapview.id);
+  useStore.setState({ activeSnapview: snapview.id });
 
   // Zoom to the snapview bbox
   map.fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [0, 0] });
@@ -176,7 +184,7 @@ export async function restoreSnapview(snapview) {
     const state = themeState[key];
     // Check if DuckDB table exists (has cached data from this session)
     if (state && bboxContains(state.bbox, bbox)) {
-      await enableThemeFromCache(key, bbox);
+      await enableThemeFromCache(key, bbox, snapview.cap);
       restoredFromCache++;
     } else {
       // No cache — fire a fresh load (non-blocking)
@@ -185,7 +193,7 @@ export async function restoreSnapview(snapview) {
   }
 
   if (restoredFromCache === validKeys.length) {
-    statusStore.set({ text: `Restored ${validKeys.length} theme${validKeys.length > 1 ? 's' : ''}`, type: 'success' });
+    useStore.setState({ status: { text: `Restored ${validKeys.length} theme${validKeys.length > 1 ? 's' : ''}`, type: 'success' } });
   }
   // If some themes needed fresh loads, the loading overlay will show progress
 }
@@ -197,10 +205,10 @@ export async function clearCache() {
     return;
   }
 
-  statusStore.set({ text: 'Clearing cache...', type: 'loading' });
+  useStore.setState({ status: { text: 'Clearing cache...', type: 'loading' } });
 
   activeSnapviewId = null;
-  activeSnapviewStore.set(null);
+  useStore.setState({ activeSnapview: null });
 
   clearSnapviews();
   clearIntersectionState();
@@ -215,34 +223,59 @@ export async function clearCache() {
   await Promise.all(requests);
 
   updateStats();
-  statusStore.set({ text: 'Cache cleared', type: 'success' });
+  useStore.setState({ status: { text: 'Cache cleared', type: 'success' } });
 }
 
 export function setShowSnapviewsCtrl(v) {
-  showSnapviewsStore.set(v);
+  useStore.setState({ showSnapviews: v });
   setShowSnapviews(v);
 }
 
-export function toggleSnapviewTheme(snapviewId, key, enabled) {
+export async function toggleSnapviewTheme(snapviewId, key, enabled) {
   const sv = getSnapview(snapviewId);
   if (!sv) return;
 
   if (enabled) {
+    // Always disable first to reset state cleanly
+    disableTheme(key);
+
     activeSnapviewId = snapviewId;
-    activeSnapviewStore.set(snapviewId);
+    useStore.setState({ activeSnapview: snapviewId });
+    useStore.setState({ status: { text: `Loading ${key.split('/')[1]}...`, type: 'loading' } });
+
     const state = themeState[key];
     if (state && bboxContains(state.bbox, sv.bbox)) {
-      enableThemeFromCache(key, sv.bbox);
+      await enableThemeFromCache(key, sv.bbox, sv.cap);
     } else {
       toggleTheme(key, true, snapviewId);
     }
   } else {
     disableTheme(key);
+    updateStats();
   }
 }
 
+export async function onSnapviewCapChange(snapviewId, cap) {
+  updateSnapviewCap(snapviewId, cap);
+
+  // If this is the active snapview, re-render all enabled themes with the new cap
+  if (activeSnapviewId === snapviewId) {
+    useStore.setState({ status: { text: 'Re-rendering...', type: 'loading' } });
+    await rerenderAllEnabled(cap);
+    useStore.setState({ status: { text: 'Done', type: 'success' } });
+  }
+}
+
+export async function refreshViewport(snapviewId) {
+  const sv = getSnapview(snapviewId);
+  if (!sv) return;
+  useStore.setState({ status: { text: 'Refreshing viewport...', type: 'loading' } });
+  await rerenderAllEnabled(sv.cap);
+  useStore.setState({ status: { text: 'Viewport refreshed', type: 'success' } });
+}
+
 export async function setHighlightIntersections(v) {
-  highlightIntersectionsStore.set(v);
+  useStore.setState({ highlightIntersections: v });
   setIntersectionMode(v);
   await recomputeIntersections(themeState, currentRelease);
   rerenderAllEnabled();

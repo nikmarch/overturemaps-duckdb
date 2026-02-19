@@ -8,25 +8,18 @@ import { darkenHex } from './render.js';
 import { isIntersectionMode, recomputeIntersections } from './intersections.js';
 import { setSnapviewRelease } from './snapviews.js';
 import {
-  status as statusStore,
-  themes as themesStore,
-  themeUi,
-  releases as releasesStore,
-  selectedRelease as selectedReleaseStore,
-  viewportStats as viewportStatsStore,
-  viewportCap as viewportCapStore,
+  useStore,
   updateSnapviewTheme,
   checkSnapviewComplete,
   failSnapview,
-} from './stores.js';
-import { get } from 'svelte/store';
+} from './store.js';
 
 export const themeState = {};
 export let currentRelease = null;
 const THEME_KEY_COLORS = {};
 
 function log(msg, type = 'loading') {
-  statusStore.set({ text: msg, type });
+  useStore.setState({ status: { text: msg, type } });
 }
 
 export function getThemeColor(key) {
@@ -46,9 +39,20 @@ export function assignColors(themes) {
   return sorted;
 }
 
-// Per-theme render budget: viewportCap / enabledThemeCount
-export function getRenderLimit() {
-  const cap = get(viewportCapStore);
+// Get the active snapview's cap, falling back to global viewportCap
+export function getActiveCap() {
+  const state = useStore.getState();
+  const activeId = state.activeSnapview;
+  if (activeId) {
+    const sv = state.snapviews.find(s => s.id === activeId);
+    if (sv?.cap) return sv.cap;
+  }
+  return state.viewportCap;
+}
+
+// Per-theme render budget: cap / enabledThemeCount
+export function getRenderLimit(overrideCap) {
+  const cap = overrideCap ?? getActiveCap();
   const enabledCount = Object.values(themeState).filter(s => s.enabled).length || 1;
   return Math.max(1, Math.floor(cap / enabledCount));
 }
@@ -67,7 +71,9 @@ export function updateStats() {
     }
   }
   const shownText = shown.length ? shown.join(', ') : '-';
-  viewportStatsStore.update(s => ({ ...s, shownText, enabledCount, totalThemes, totalRendered }));
+  useStore.setState(s => ({
+    viewportStats: { ...s.viewportStats, shownText, enabledCount, totalThemes, totalRendered },
+  }));
 }
 
 export function initTheme(key) {
@@ -75,13 +81,17 @@ export function initTheme(key) {
   const layer = L.layerGroup();
   layer.addTo(map);
   themeState[key] = { key, layer, markers: [], bbox: null, limit: 33000, loadedCount: 0, enabled: false };
-  themeUi.update(m => ({ ...m, [key]: { enabled: false, limit: 33000, loading: false, metaText: '' } }));
+  useStore.setState(s => ({
+    themeUi: { ...s.themeUi, [key]: { enabled: false, limit: 33000, loading: false, metaText: '' } },
+  }));
 }
 
 // toggleTheme: when enabling, fires loadTheme WITHOUT await (non-blocking)
 export function toggleTheme(key, enabled, snapviewId) {
   themeState[key].enabled = enabled;
-  themeUi.update(m => ({ ...m, [key]: { ...(m[key] || {}), enabled } }));
+  useStore.setState(s => ({
+    themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), enabled } },
+  }));
   if (enabled) {
     // Fire-and-forget: loadTheme runs in background
     loadTheme(key, snapviewId).catch(e => {
@@ -102,7 +112,9 @@ export async function setThemeLimit(key, limit) {
   const newLimit = Number(limit) || 33000;
   const oldLimit = state.limit;
   state.limit = newLimit;
-  themeUi.update(m => ({ ...m, [key]: { ...(m[key] || {}), limit: newLimit } }));
+  useStore.setState(s => ({
+    themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), limit: newLimit } },
+  }));
 
   if (state.enabled && state.bbox) {
     if (newLimit <= state.loadedCount) {
@@ -114,14 +126,14 @@ export async function setThemeLimit(key, limit) {
   }
 }
 
-async function rerenderThemeFromCache(key) {
+async function rerenderThemeFromCache(key, overrideCap) {
   const conn = getConn();
   const state = themeState[key];
   const [theme, type] = key.split('/');
   const tableName = `${theme}_${type}`;
   const color = getThemeColor(key);
   const bbox = getBbox();
-  const renderLimit = getRenderLimit();
+  const renderLimit = getRenderLimit(overrideCap);
   const t0 = performance.now();
 
   state.layer.clearLayers();
@@ -143,7 +155,9 @@ async function rerenderThemeFromCache(key) {
 
   const loadTimeMs = Math.round(performance.now() - t0);
   const rowCount = state.markers.length;
-  themeUi.update(m => ({ ...m, [key]: { ...(m[key] || {}), rowCount, loadTimeMs } }));
+  useStore.setState(s => ({
+    themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), rowCount, loadTimeMs } },
+  }));
   updateStats();
   log(`${rowCount.toLocaleString()} ${type} (${formatDuration(loadTimeMs)})`, 'success');
 }
@@ -172,9 +186,16 @@ export async function loadTheme(key, snapviewId) {
   const color = getThemeColor(key);
   const tableName = `${theme}_${type}`;
   const t0 = performance.now();
+
+  // Use snapview-specific cap if available
+  const svCap = snapviewId
+    ? useStore.getState().snapviews.find(s => s.id === snapviewId)?.cap
+    : undefined;
   let fileCount = 0;
 
-  themeUi.update(m => ({ ...m, [key]: { ...(m[key] || {}), loading: true } }));
+  useStore.setState(s => ({
+    themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), loading: true } },
+  }));
 
   // Report initial loading state to snapview
   if (snapviewId) {
@@ -197,7 +218,9 @@ export async function loadTheme(key, snapviewId) {
       fileCount = files.length;
 
       const metaText = `${filtered}/${total}`;
-      themeUi.update(m => ({ ...m, [key]: { ...(m[key] || {}), metaText } }));
+      useStore.setState(s => ({
+        themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), metaText } },
+      }));
 
       if (snapviewId) {
         updateSnapviewTheme(snapviewId, key, { status: 'loading', filesLoaded: 0, filesTotal: files.length });
@@ -210,7 +233,7 @@ export async function loadTheme(key, snapviewId) {
         let totalLoaded = 0;
         let totalRendered = 0;
         let fields = null;
-        const renderLimit = getRenderLimit();
+        const renderLimit = getRenderLimit(svCap);
 
         for (let i = 0; i < files.length && totalLoaded < limit; i += batchSize) {
           const batch = files.slice(i, i + batchSize);
@@ -276,7 +299,7 @@ export async function loadTheme(key, snapviewId) {
       state.loadedCount = state.markers.length;
     } else {
       log(`Querying cached ${type}...`);
-      const renderLimit = getRenderLimit();
+      const renderLimit = getRenderLimit(svCap);
       const fields = await getFieldsForTable(conn, tableName, key);
       const rows = (await conn.query(`
         SELECT ${fields.selectParts.join(', ')}
@@ -310,7 +333,9 @@ export async function loadTheme(key, snapviewId) {
 
     recordLoadHistory(conn, { key, bbox, limit, cached: useCache, loadTimeMs, rowCount, fileCount, release: currentRelease });
 
-    themeUi.update(m => ({ ...m, [key]: { ...(m[key] || {}), loadTimeMs, rowCount, fileCount } }));
+    useStore.setState(s => ({
+      themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), loadTimeMs, rowCount, fileCount } },
+    }));
 
     log(`${rowCount.toLocaleString()} ${type} (${formatDuration(loadTimeMs)})`, 'success');
   } catch (e) {
@@ -321,7 +346,9 @@ export async function loadTheme(key, snapviewId) {
       failSnapview(snapviewId, e);
     }
   } finally {
-    themeUi.update(m => ({ ...m, [key]: { ...(m[key] || {}), loading: false } }));
+    useStore.setState(s => ({
+      themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), loading: false } },
+    }));
   }
 }
 
@@ -355,20 +382,24 @@ async function recordLoadHistory(conn, { key, bbox, limit, cached, loadTimeMs, r
   }
 }
 
-export async function enableThemeFromCache(key, snapviewBbox) {
+export async function enableThemeFromCache(key, snapviewBbox, snapviewCap) {
   const conn = getConn();
   const state = themeState[key];
-  if (!state || state.enabled) return;
+  if (!state) return;
 
   const [theme, type] = key.split('/');
   const tableName = `${theme}_${type}`;
   const color = getThemeColor(key);
-  const renderLimit = getRenderLimit();
+  const renderLimit = getRenderLimit(snapviewCap);
   const t0 = performance.now();
 
   state.enabled = true;
   state.layer.clearLayers();
   state.markers = [];
+
+  useStore.setState(s => ({
+    themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), enabled: true, loading: true } },
+  }));
 
   let rowCount = 0;
   try {
@@ -387,12 +418,17 @@ export async function enableThemeFromCache(key, snapviewBbox) {
       state.bbox = { ...snapviewBbox };
       state.loadedCount = rowCount;
     }
-  } catch {
-    // Table might not exist yet
+    log(`${rowCount.toLocaleString()} ${type} (cached)`, 'success');
+  } catch (e) {
+    console.warn(`enableThemeFromCache ${key} failed:`, e?.message);
+    log(`Failed to load cached ${type}`, 'error');
+    state.enabled = false;
   }
 
   const loadTimeMs = Math.round(performance.now() - t0);
-  themeUi.update(m => ({ ...m, [key]: { ...(m[key] || {}), enabled: true, rowCount, loadTimeMs } }));
+  useStore.setState(s => ({
+    themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), enabled: state.enabled, rowCount, loadTimeMs, loading: false } },
+  }));
   updateStats();
 }
 
@@ -402,13 +438,15 @@ export function disableTheme(key) {
   state.enabled = false;
   state.layer.clearLayers();
   state.markers = [];
-  themeUi.update(m => ({ ...m, [key]: { ...(m[key] || {}), enabled: false } }));
+  useStore.setState(s => ({
+    themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), enabled: false } },
+  }));
   updateStats();
 }
 
-export async function rerenderAllEnabled() {
+export async function rerenderAllEnabled(overrideCap) {
   const conn = getConn();
-  const renderLimit = getRenderLimit();
+  const renderLimit = getRenderLimit(overrideCap);
   for (const key of Object.keys(themeState)) {
     const state = themeState[key];
     if (!state.enabled) continue;
@@ -433,6 +471,11 @@ export async function rerenderAllEnabled() {
     } catch (e) {
       console.error(e);
     }
+
+    const rowCount = state.markers.length;
+    useStore.setState(s => ({
+      themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), rowCount } },
+    }));
     updateStats();
   }
 }
@@ -442,10 +485,10 @@ export async function loadReleases() {
   const res = await fetch(`${PROXY}/releases`);
   const data = await res.json();
   const rels = data.releases ?? data;
-  releasesStore.set(rels);
+  useStore.setState({ releases: rels });
 
   if (rels.length > 0) {
-    selectedReleaseStore.set(rels[0]);
+    useStore.setState({ selectedRelease: rels[0] });
     await onReleaseChange(rels[0]);
   }
 }
@@ -453,7 +496,7 @@ export async function loadReleases() {
 export async function onReleaseChange(release) {
   const map = getMap();
   currentRelease = release;
-  selectedReleaseStore.set(release);
+  useStore.setState({ selectedRelease: release });
   setSnapviewRelease(release);
 
   for (const key of Object.keys(themeState)) {
@@ -465,7 +508,7 @@ export async function onReleaseChange(release) {
   log('Loading themes...');
   const res = await fetch(`${PROXY}/themes?release=${release}`);
   const themes = await res.json();
-  themesStore.set(themes);
+  useStore.setState({ themes });
 
   const sorted = assignColors(themes);
   for (const { theme, type } of sorted) {
@@ -483,11 +526,11 @@ export function clearAllThemes() {
     themeState[key].loadedCount = 0;
     themeState[key].enabled = false;
   }
-  themeUi.update(m => {
-    const next = { ...m };
+  useStore.setState(s => {
+    const next = { ...s.themeUi };
     for (const key of Object.keys(next)) {
       next[key] = { ...next[key], enabled: false };
     }
-    return next;
+    return { themeUi: next };
   });
 }
