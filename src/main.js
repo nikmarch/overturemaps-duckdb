@@ -84,14 +84,16 @@ const THEME_FIELDS = {
     { col: 'country', sql: 'country', label: 'Country' },
     { col: 'population', sql: 'population', label: 'Population' },
     { col: 'sources', sql: 'sources[1].record_id', label: 'OSM record' },
-    { col: 'sources', sql: "regexp_extract(sources[1].record_id, '^r([0-9]+)@', 1)", label: 'OSM relation id' },
+    // Normalize: keep the 'r' prefix, drop @suffix.
+    { col: 'sources', sql: "regexp_replace(sources[1].record_id, '@.*', '')", label: 'OSM relation id' },
   ],
   'divisions/division_area': [
     { col: 'subtype', sql: 'subtype', label: 'Subtype' },
     { col: 'country', sql: 'country', label: 'Country' },
     // Overture divisions are sourced from OSM; record_id looks like r3766655@...
     { col: 'sources', sql: 'sources[1].record_id', label: 'OSM record' },
-    { col: 'sources', sql: "regexp_extract(sources[1].record_id, '^r([0-9]+)@', 1)", label: 'OSM relation id' },
+    // Normalize: keep the 'r' prefix, drop @suffix.
+    { col: 'sources', sql: "regexp_replace(sources[1].record_id, '@.*', '')", label: 'OSM relation id' },
   ],
   'divisions/division_boundary': [
     { col: 'subtype', sql: 'subtype', label: 'Subtype' },
