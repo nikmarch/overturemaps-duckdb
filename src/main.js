@@ -860,7 +860,8 @@ function renderFeature(row, state, color, extraFields = []) {
 
   if (leafletObj) {
     const name = row.display_name || row.id || '?';
-    let popup = `<b>${name}</b>`;
+    let popup = `<small style="color:#888">${state.key} &middot; ${geomType}</small>`;
+    popup += `<br><b>${name}</b>`;
     for (let i = 0; i < extraFields.length; i++) {
       const val = row[`_f${i}`];
       if (val != null && val !== '') {
