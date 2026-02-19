@@ -279,7 +279,8 @@ function bboxFilter(bbox) {
 async function loadReleases() {
   log('Loading releases...');
   const res = await fetch(`${PROXY}/releases`);
-  const rels = await res.json();
+  const data = await res.json();
+  const rels = data.releases ?? data;
 
   // Let Svelte own the dropdown.
   window.__uiSetReleases?.(rels);
