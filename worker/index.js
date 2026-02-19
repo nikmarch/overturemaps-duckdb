@@ -8,6 +8,11 @@ const TYPE_MAP = {
   places: { theme: 'places', type: 'place' },
 };
 
+// Cache TTLs: production = 1 day, dev/preview = 1 minute
+function cacheTtl(env) {
+  return env.ENVIRONMENT === 'production' ? 86400 : 60;
+}
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
@@ -22,9 +27,11 @@ export default {
 
     if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
+    const ttl = cacheTtl(env);
+
     // GET /releases
     if (url.pathname === '/releases') {
-      return handleReleases(request, ctx);
+      return handleReleases(request, ctx, ttl);
     }
 
     // GET /index/:release/:type
@@ -33,7 +40,7 @@ export default {
     if (indexMatch) {
       const release = indexMatch[1];
       const dataType = indexMatch[2];
-      return handleIndex(request, ctx, { release, dataType });
+      return handleIndex(request, ctx, { release, dataType, ttl });
     }
 
     // GET /files/:type?release=...&xmin=...&xmax=...&ymin=...&ymax=...
@@ -51,7 +58,7 @@ export default {
     }
 
     // Otherwise: S3 proxy (same-origin + Range passthrough + cache listing XML)
-    return handleS3Proxy(request, url);
+    return handleS3Proxy(request, url, ttl);
   },
 };
 
@@ -69,7 +76,7 @@ function cacheKeyUrl(kind, parts) {
   return `https://cache.local/${kind}/${parts.join('/')}`;
 }
 
-async function handleReleases(request, ctx) {
+async function handleReleases(request, ctx, ttl) {
   const cache = caches.default;
   const key = new Request(cacheKeyUrl('releases', ['v1']));
   const cached = await cache.match(key);
@@ -87,7 +94,7 @@ async function handleReleases(request, ctx) {
   const releases = extractReleasesFromS3Listing(xml);
   const res = json({ releases }, {
     headers: {
-      'Cache-Control': 'public, s-maxage=86400, stale-while-revalidate=604800',
+      'Cache-Control': `public, s-maxage=${ttl}`,
       'X-Cache': 'MISS',
     },
   });
@@ -121,7 +128,7 @@ function extractReleasesFromS3Listing(xml) {
   return [...versions].sort().reverse();
 }
 
-async function handleIndex(request, ctx, { release, dataType }) {
+async function handleIndex(request, ctx, { release, dataType, ttl }) {
   const cache = caches.default;
   const key = new Request(cacheKeyUrl('index', ['v1', release, dataType]));
   const cached = await cache.match(key);
@@ -132,7 +139,7 @@ async function handleIndex(request, ctx, { release, dataType }) {
   }
 
   // Build in background; caller polls.
-  ctx.waitUntil(buildAndCacheIndex(cache, key, { release, dataType }));
+  ctx.waitUntil(buildAndCacheIndex(cache, key, { release, dataType, ttl }));
   return json(
     { status: 'building', release, type: dataType },
     {
@@ -146,7 +153,7 @@ async function handleIndex(request, ctx, { release, dataType }) {
   );
 }
 
-async function buildAndCacheIndex(cache, keyRequest, { release, dataType }) {
+async function buildAndCacheIndex(cache, keyRequest, { release, dataType, ttl }) {
   // Small delay to increase the chance that duplicate requests share work via cache fill,
   // without requiring locks/DO.
   await sleep(50);
@@ -182,7 +189,7 @@ async function buildAndCacheIndex(cache, keyRequest, { release, dataType }) {
     { status: 'ready', release, type: dataType, index },
     {
       headers: {
-        'Cache-Control': 'public, s-maxage=259200, stale-while-revalidate=604800', // 3 days + SWR 7d
+        'Cache-Control': `public, s-maxage=${ttl}`,
       },
     },
   );
@@ -237,7 +244,7 @@ async function handleFiles(request, ctx, { release, dataType, url }) {
   });
 }
 
-async function handleS3Proxy(request, url) {
+async function handleS3Proxy(request, url, ttl) {
   const cache = caches.default;
   const isListing = url.search.includes('prefix=');
 
@@ -265,7 +272,7 @@ async function handleS3Proxy(request, url) {
     if (s3Response.headers.has(h)) responseHeaders[h] = s3Response.headers.get(h);
   });
 
-  responseHeaders['Cache-Control'] = isListing ? 'public, s-maxage=86400' : 'no-store';
+  responseHeaders['Cache-Control'] = isListing ? `public, s-maxage=${ttl}` : 'no-store';
 
   const response = new Response(s3Response.body, {
     status: s3Response.status,

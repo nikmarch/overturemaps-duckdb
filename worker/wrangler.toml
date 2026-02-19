@@ -2,6 +2,11 @@ name = "overture-s3-proxy"
 main = "index.js"
 compatibility_date = "2024-01-01"
 
+# Cache TTLs: production=1 day, anything else=1 minute.
+# Override locally: wrangler dev --var ENVIRONMENT:dev
+[vars]
+ENVIRONMENT = "production"
+
 # Migration history: SpatialIndex DO was added in v1, then removed.
 # Both migrations must remain so Cloudflare can replay the full chain.
 [[migrations]]
