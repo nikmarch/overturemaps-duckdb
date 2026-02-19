@@ -203,12 +203,13 @@ function renderFootprints() {
     const { bbox, color, cached } = fp;
     const bounds = [[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]];
     const rect = L.rectangle(bounds, {
+      // Make the border a bit more readable, but keep it visually "secondary" via dashes.
       color: color?.stroke || '#000',
-      weight: 0.8,
+      weight: 1.3,
       fillColor: color?.fill || '#000',
       // Keep footprints subtle; they’re for context, not a layer.
       fillOpacity: cached ? 0.015 : 0.04,
-      dashArray: cached ? '4 6' : null,
+      dashArray: cached ? '2 6' : '6 6',
       interactive: true,
     });
 
