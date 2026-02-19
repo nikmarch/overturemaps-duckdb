@@ -1,240 +1,80 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
 
-#map { height: 100vh; width: 100%; }
+#map { height: 100vh; width: 100%; position: relative; }
 
-#controls {
+/* Intersection cross marker */
+.intersection-cross {
+  background: transparent !important;
+  border: none !important;
+}
+.intersection-cross::before,
+.intersection-cross::after {
+  content: '';
   position: absolute;
-  top: 10px;
+  background: #e74c3c;
+  border-radius: 1px;
+}
+.intersection-cross::before {
+  width: 2px; height: 12px;
+  top: 0; left: 5px;
+}
+.intersection-cross::after {
+  width: 12px; height: 2px;
+  top: 5px; left: 0;
+}
+
+/* Load Area FAB button */
+.load-area-btn {
+  position: absolute;
+  bottom: 28px;
   right: 10px;
   z-index: 1000;
-  background: white;
-  padding: 16px;
-  border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
-  min-width: 280px;
-  max-width: 320px;
-}
-
-#controlsHeader {
-  display: flex;
-  gap: 8px;
-  align-items: stretch;
-}
-
-#collapseBtn {
-  padding: 0 12px;
-  font-size: 18px;
-  font-weight: bold;
-  line-height: 1;
-  background: #f0f0f0;
-  color: #666;
-  border-radius: 6px;
-}
-#collapseBtn:hover:not(:disabled) {
-  background: #e0e0e0;
-  transform: none;
-}
-
-#controlsBody {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-top: 12px;
-}
-#controlsBody.collapsed { display: none; }
-
-#status {
-  flex: 1;
-  font-size: 13px;
-  font-weight: 600;
-  color: #666;
-  padding: 12px 14px;
-  background: #f8f9fa;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-#status.loading {
-  background: #fff3cd;
-  color: #856404;
-  animation: pulse 1.5s ease-in-out infinite;
-}
-#status.error { background: #f8d7da; color: #721c24; }
-#status.success { background: #d4edda; color: #155724; }
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
-}
-
-#statsBar {
-  display: flex;
-  gap: 16px;
-  padding: 8px 12px;
-  background: #f0f4f8;
-  border-radius: 6px;
-  margin-top: 8px;
-  font-size: 12px;
-}
-.stat {
-  display: flex;
-  gap: 4px;
-}
-.stat-label {
-  color: #666;
-}
-#shownStats {
-  font-weight: 600;
-  color: #333;
-}
-
-.spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid #ccc;
-  border-top-color: #007bff;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  display: none;
-}
-#status.loading .spinner { display: block; }
-@keyframes spin { to { transform: rotate(360deg); } }
-
-button {
-  padding: 10px 16px;
-  cursor: pointer;
+  padding: 10px 20px;
   background: #007bff;
   color: white;
   border: none;
-  border-radius: 8px;
+  border-radius: 10px;
   font-size: 14px;
   font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
   transition: all 0.2s;
 }
-button:hover:not(:disabled) { background: #0056b3; transform: translateY(-1px); }
-button:disabled { background: #ccc; cursor: not-allowed; }
-
-.btn-row {
-  display: flex;
+.load-area-btn:hover {
+  background: #0056b3;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  transform: translateY(-1px);
 }
 
-#clearCacheBtn {
-  width: 100%;
-  background: #6c757d;
-}
-
-#clearCacheBtn:hover:not(:disabled) { background: #5a6268; }
-
-.select-row {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.select-row label {
-  font-size: 13px;
-  color: #666;
-  font-weight: 500;
-}
-.select-row select {
-  padding: 8px 10px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 14px;
-  background: white;
-}
-.select-row select:disabled {
-  background: #f0f0f0;
-  color: #999;
-}
-
-#themeList {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.checkbox-row {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.checkbox-row label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: #666;
-  font-weight: 400;
-  cursor: pointer;
-}
-
-.checkbox-row input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  accent-color: #007bff;
-}
-
-.theme-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 8px;
-  border-radius: 6px;
-  transition: background 0.15s;
-}
-.theme-row:hover {
-  background: #f8f9fa;
-}
-.theme-row label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 400;
-  cursor: pointer;
-  flex: 1;
-  min-width: 0;
-}
+/* Theme dot (shared) */
 .theme-dot {
   width: 10px;
   height: 10px;
   border-radius: 50%;
   flex-shrink: 0;
 }
-.theme-row input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  accent-color: #007bff;
-  cursor: pointer;
-  flex-shrink: 0;
+
+/* Snapview map label (Leaflet tooltip) */
+.snapview-label {
+  background: rgba(255, 255, 255, 0.85) !important;
+  border: none !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15) !important;
+  padding: 3px 8px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  color: #333 !important;
+  border-radius: 4px !important;
+  white-space: nowrap !important;
+  pointer-events: none !important;
 }
-.theme-name {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.snapview-label::before {
+  display: none !important;
 }
-.theme-meta {
-  font-size: 10px;
-  color: #999;
-  white-space: nowrap;
-  flex-shrink: 0;
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
 }
-.theme-limit {
-  width: 70px;
-  padding: 4px 6px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  font-size: 12px;
-  text-align: right;
-  flex-shrink: 0;
-}
-.theme-limit:focus {
-  outline: none;
-  border-color: #007bff;
-}
-.theme-row.loading {
-  opacity: 0.6;
-}
+
+@keyframes spin { to { transform: rotate(360deg); } }

@@ -7,9 +7,9 @@
   }
 </script>
 
-<div class="release-row">
+<div class="select-row">
   <label for="releaseSelect">Release</label>
-  <select id="releaseSelect" on:change={onChange} bind:value={$selectedRelease} disabled={$releases.length === 0}>
+  <select id="releaseSelect" onchange={onChange} bind:value={$selectedRelease} disabled={$releases.length === 0}>
     {#each $releases as r}
       <option value={r}>{r}</option>
     {/each}

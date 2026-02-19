@@ -2,320 +2,245 @@ import { parquetMetadataAsync } from 'hyparquet';
 
 const S3_BASE = 'https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com';
 
+// Cache TTLs: production = 1 day, dev/preview = 1 minute
+function cacheTtl(env) {
+  return env.ENVIRONMENT === 'production' ? 86400 : 60;
+}
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
   'Access-Control-Allow-Headers': '*',
-  'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, X-Total-Files, X-Filtered-Files',
+  'Access-Control-Expose-Headers':
+    'Content-Length, Content-Range, Accept-Ranges, X-Total-Files, X-Filtered-Files, X-Cache, Retry-After',
 };
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders });
-    }
+    const ttl = cacheTtl(env);
 
-    // GET /releases - list available Overture releases
-    if (url.pathname === '/releases') {
-      return handleListReleases();
-    }
+    if (url.pathname === '/releases') return handleReleases(ctx, ttl);
+    if (url.pathname === '/themes') return handleThemes(ctx, url, ttl);
+    if (url.pathname === '/files') return handleFiles(ctx, url, ttl);
 
-    // GET /themes?release=X - list theme/type combos for a release
-    if (url.pathname === '/themes') {
-      const release = url.searchParams.get('release');
-      if (!release) return new Response('Missing release param', { status: 400, headers: corsHeaders });
-      return handleListThemes(release);
-    }
-
-    // GET /files?release=X&theme=Y&type=Z[&xmin=...&xmax=...&ymin=...&ymax=...]
-    // Simplified: return ALL files for the theme/type (no spatial index / no DO), and let DuckDB do bbox filtering.
-    if (url.pathname === '/files') {
-      const release = url.searchParams.get('release');
-      const theme = url.searchParams.get('theme');
-      const type = url.searchParams.get('type');
-      if (!release || !theme || !type) {
-        return new Response('Missing release/theme/type params', { status: 400, headers: corsHeaders });
-      }
-      return handleListFiles(release, theme, type);
-    }
-
-    // GET /index/clear?release=X&theme=Y&type=Z
-    if (url.pathname === '/index/clear') {
-      const release = url.searchParams.get('release');
-      const theme = url.searchParams.get('theme');
-      const type = url.searchParams.get('type');
-      if (!release || !theme || !type) {
-        return new Response('Missing release/theme/type params', { status: 400, headers: corsHeaders });
-      }
-      const doName = `${release}/${theme}/${type}`;
-      const id = env.SPATIAL_INDEX.idFromName(doName);
-      const stub = env.SPATIAL_INDEX.get(id);
-      await stub.fetch(new Request('http://internal/clear'));
-      return new Response(JSON.stringify({ cleared: doName }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
-    }
-
-    // GET /index/status?release=X&theme=Y&type=Z
-    if (url.pathname === '/index/status') {
-      const release = url.searchParams.get('release');
-      const theme = url.searchParams.get('theme');
-      const type = url.searchParams.get('type');
-      if (!release || !theme || !type) {
-        return new Response('Missing release/theme/type params', { status: 400, headers: corsHeaders });
-      }
-      const doName = `${release}/${theme}/${type}`;
-      const id = env.SPATIAL_INDEX.idFromName(doName);
-      const stub = env.SPATIAL_INDEX.get(id);
-      const res = await stub.fetch(new Request('http://internal/status'));
-      return new Response(res.body, {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
-    }
-
-    // S3 proxy
-    return handleS3Proxy(request, url);
-  }
+    // S3 proxy: passthrough for /release/... parquet files and listing XML
+    return handleS3Proxy(request, ctx, url, ttl);
+  },
 };
 
-async function handleListReleases() {
-  const listUrl = `${S3_BASE}/?prefix=release/&delimiter=/`;
-  const response = await fetch(listUrl);
-  const xml = await response.text();
-  const releases = [...xml.matchAll(/<Prefix>release\/([^<]+)\/<\/Prefix>/g)]
-    .map(m => m[1])
-    .sort()
-    .reverse();
-  return new Response(JSON.stringify(releases), {
-    headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600' }
-  });
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function json(body, init = {}) {
+  const headers = { ...(init.headers || {}), 'Content-Type': 'application/json', ...corsHeaders };
+  return new Response(JSON.stringify(body), { ...init, headers });
 }
 
-async function handleListThemes(release) {
-  const prefix = `release/${release}/`;
-  const listUrl = `${S3_BASE}/?prefix=${encodeURIComponent(prefix)}&delimiter=/`;
-  const response = await fetch(listUrl);
-  const xml = await response.text();
-  const themePrefixes = [...xml.matchAll(/<Prefix>([^<]+)<\/Prefix>/g)]
-    .map(m => m[1])
-    .filter(p => p.includes('theme='));
+function cacheKey(kind, parts) {
+  return new Request(`https://cache.local/${kind}/${parts.join('/')}`);
+}
 
-  const results = [];
-  for (const themePrefix of themePrefixes) {
-    const themeMatch = themePrefix.match(/theme=([^/]+)/);
+async function cachedJson(cache, key) {
+  const hit = await cache.match(key);
+  if (!hit) return null;
+  return { data: await hit.json(), response: hit };
+}
+
+// ── GET /releases ───────────────────────────────────────────────────────────
+
+async function handleReleases(ctx, ttl) {
+  const cache = caches.default;
+  const key = cacheKey('releases', ['v1']);
+  const hit = await cache.match(key);
+  if (hit) return withCacheHeader(hit, 'HIT');
+
+  const listUrl = `${S3_BASE}/?prefix=release/&delimiter=/&max-keys=1000`;
+  const xml = await (await fetch(listUrl)).text();
+  const releases = extractReleases(xml);
+
+  const res = json(releases, {
+    headers: { 'Cache-Control': `public, s-maxage=${ttl}`, 'X-Cache': 'MISS' },
+  });
+  ctx.waitUntil(cache.put(key, res.clone()));
+  return res;
+}
+
+function extractReleases(xml) {
+  const prefixes = [...xml.matchAll(/<Prefix>(release\/[^<]+)<\/Prefix>/g)].map(m => m[1]);
+  const versions = new Set();
+  for (const p of prefixes) {
+    const m = p.match(/^release\/([^/]+)\//);
+    if (m) versions.add(m[1]);
+  }
+  if (versions.size === 0) {
+    const keys = [...xml.matchAll(/<Key>(release\/[^<]+)<\/Key>/g)].map(m => m[1]);
+    for (const k of keys) {
+      const m = k.match(/^release\/([^/]+)\//);
+      if (m) versions.add(m[1]);
+    }
+  }
+  return [...versions].sort().reverse();
+}
+
+// ── GET /themes?release=X ───────────────────────────────────────────────────
+// Returns [{theme, type}, ...] by listing S3 prefixes for a release.
+
+async function handleThemes(ctx, url, ttl) {
+  const release = url.searchParams.get('release');
+  if (!release) return json({ error: 'Missing ?release' }, { status: 400 });
+
+  const cache = caches.default;
+  const key = cacheKey('themes', [release]);
+  const hit = await cache.match(key);
+  if (hit) return withCacheHeader(hit, 'HIT');
+
+  // List theme= prefixes under this release
+  const listUrl = `${S3_BASE}/?prefix=release/${release}/&delimiter=/&max-keys=1000`;
+  const xml = await (await fetch(listUrl)).text();
+
+  // Prefixes look like: release/2026-02-18.0/theme=buildings/
+  const themePrefixes = [...xml.matchAll(/<Prefix>(release\/[^<]+)<\/Prefix>/g)].map(m => m[1]);
+  const themes = [];
+
+  // For each theme, list type= prefixes
+  for (const tp of themePrefixes) {
+    const themeMatch = tp.match(/theme=([^/]+)/);
     if (!themeMatch) continue;
     const theme = themeMatch[1];
 
-    const typeUrl = `${S3_BASE}/?prefix=${encodeURIComponent(themePrefix)}&delimiter=/`;
-    const typeResponse = await fetch(typeUrl);
-    const typeXml = await typeResponse.text();
-    const types = [...typeXml.matchAll(/<Prefix>[^<]*type=([^/<]+)\/<\/Prefix>/g)]
-      .map(m => m[1]);
+    const typeListUrl = `${S3_BASE}/?prefix=${tp}&delimiter=/&max-keys=1000`;
+    const typeXml = await (await fetch(typeListUrl)).text();
+    const typePrefixes = [...typeXml.matchAll(/<Prefix>([^<]+)<\/Prefix>/g)].map(m => m[1]);
 
-    for (const type of types) {
-      results.push({ theme, type });
+    for (const tyP of typePrefixes) {
+      const typeMatch = tyP.match(/type=([^/]+)/);
+      if (typeMatch) themes.push({ theme, type: typeMatch[1] });
     }
   }
 
-  return new Response(JSON.stringify(results), {
-    headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600' }
+  const res = json(themes, {
+    headers: { 'Cache-Control': `public, s-maxage=${ttl}`, 'X-Cache': 'MISS' },
   });
+  ctx.waitUntil(cache.put(key, res.clone()));
+  return res;
 }
 
-async function handleListFiles(release, theme, type) {
-  const prefix = `release/${release}/theme=${theme}/type=${type}/`;
-  const files = await listFiles(prefix);
-  return new Response(JSON.stringify(files), {
+// ── GET /files?release=X&theme=T&type=Y[&xmin&xmax&ymin&ymax] ──────────────
+// Lists parquet files, optionally filtered by bbox using parquet metadata.
+
+async function handleFiles(ctx, url, ttl) {
+  const release = url.searchParams.get('release');
+  const theme = url.searchParams.get('theme');
+  const type = url.searchParams.get('type');
+  if (!release || !theme || !type) {
+    return json({ error: 'Missing required params: release, theme, type' }, { status: 400 });
+  }
+
+  const cache = caches.default;
+  const indexKey = cacheKey('index', [release, theme, type]);
+  const hit = await cachedJson(cache, indexKey);
+
+  let index;
+  if (hit) {
+    index = hit.data;
+  } else {
+    // Build index: list all files + extract bbox from parquet metadata
+    const files = await listS3Files({ release, theme, type });
+    index = await buildBboxIndex(files);
+    const indexRes = json(index, {
+      headers: { 'Cache-Control': `public, s-maxage=${ttl}` },
+    });
+    ctx.waitUntil(cache.put(indexKey, indexRes));
+  }
+
+  const xmin = parseFloat(url.searchParams.get('xmin'));
+  const xmax = parseFloat(url.searchParams.get('xmax'));
+  const ymin = parseFloat(url.searchParams.get('ymin'));
+  const ymax = parseFloat(url.searchParams.get('ymax'));
+
+  let files = Object.keys(index);
+  const totalFiles = files.length;
+
+  if (!isNaN(xmin) && !isNaN(xmax) && !isNaN(ymin) && !isNaN(ymax)) {
+    files = files.filter(f => {
+      const b = index[f];
+      return b.xmax >= xmin && b.xmin <= xmax && b.ymax >= ymin && b.ymin <= ymax;
+    });
+  }
+
+  // Return bare S3 keys (UI prepends origin)
+  return json(files, {
     headers: {
-      ...corsHeaders,
-      'Content-Type': 'application/json',
-      // Old API shape expects both headers; filtered == total in this simplified mode.
-      'X-Total-Files': String(files.length),
-      'X-Filtered-Files': String(files.length),
+      'X-Total-Files': totalFiles.toString(),
+      'X-Filtered-Files': files.length.toString(),
+      'X-Cache': hit ? 'HIT' : 'MISS',
       'Cache-Control': 'no-store',
-    }
+    },
   });
 }
 
-async function handleS3Proxy(request, url) {
+async function buildBboxIndex(files) {
+  const concurrency = 5;
+  const index = {};
+
+  for (let i = 0; i < files.length; i += concurrency) {
+    const batch = files.slice(i, i + concurrency);
+    await Promise.all(
+      batch.map(async file => {
+        try {
+          const buf = await createAsyncBuffer(`${S3_BASE}/${file}`);
+          const meta = await parquetMetadataAsync(buf);
+          index[file] = extractBbox(meta);
+        } catch {
+          index[file] = { xmin: -180, xmax: 180, ymin: -90, ymax: 90 };
+        }
+      }),
+    );
+  }
+
+  return index;
+}
+
+// ── S3 Proxy ────────────────────────────────────────────────────────────────
+
+async function handleS3Proxy(request, ctx, url, ttl) {
   const cache = caches.default;
   const isListing = url.search.includes('prefix=');
 
   if (isListing) {
     const cached = await cache.match(request);
-    if (cached) {
-      const response = new Response(cached.body, cached);
-      response.headers.set('X-Cache', 'HIT');
-      return response;
-    }
+    if (cached) return withCacheHeader(cached, 'HIT');
   }
 
   const s3Url = `${S3_BASE}${url.pathname}${url.search}`;
-  const s3Request = { method: request.method, headers: {} };
+  const headers = {};
+  if (request.headers.has('Range')) headers['Range'] = request.headers.get('Range');
 
-  if (request.headers.has('Range')) {
-    s3Request.headers['Range'] = request.headers.get('Range');
+  const s3Res = await fetch(s3Url, { method: request.method, headers });
+  const resHeaders = { ...corsHeaders };
+  resHeaders['Content-Type'] = s3Res.headers.get('Content-Type') || 'application/octet-stream';
+  for (const h of ['Content-Length', 'Content-Range', 'Accept-Ranges']) {
+    if (s3Res.headers.has(h)) resHeaders[h] = s3Res.headers.get(h);
   }
+  resHeaders['Cache-Control'] = isListing ? `public, s-maxage=${ttl}` : 'no-store';
 
-  const s3Response = await fetch(s3Url, s3Request);
-  const responseHeaders = { ...corsHeaders };
-  responseHeaders['Content-Type'] = s3Response.headers.get('Content-Type') || 'application/octet-stream';
-
-  ['Content-Length', 'Content-Range', 'Accept-Ranges'].forEach(h => {
-    if (s3Response.headers.has(h)) responseHeaders[h] = s3Response.headers.get(h);
-  });
-
-  responseHeaders['Cache-Control'] = isListing ? 'public, max-age=86400' : 'no-store';
-
-  const response = new Response(s3Response.body, {
-    status: s3Response.status,
-    headers: responseHeaders,
-  });
-
-  if (isListing && s3Response.ok) {
-    await cache.put(request, response.clone());
-  }
-
+  const response = new Response(s3Res.body, { status: s3Res.status, headers: resHeaders });
+  if (isListing && s3Res.ok) ctx.waitUntil(cache.put(request, response.clone()));
   return response;
 }
 
-// Durable Object for spatial index
-export class SpatialIndex {
-  constructor(state, env) {
-    this.state = state;
-    this.index = null;
-    this.building = false;
-  }
+// ── S3 listing ──────────────────────────────────────────────────────────────
 
-  async fetch(request) {
-    const url = new URL(request.url);
-
-    if (url.pathname === '/clear') {
-      this.index = null;
-      await this.state.storage.delete('index');
-      await this.state.storage.delete('meta');
-      return new Response(JSON.stringify({ cleared: true }), {
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    if (url.pathname === '/status') {
-      const meta = await this.state.storage.get('meta');
-      const sample = this.index ? Object.entries(this.index).slice(0, 2) : [];
-      return new Response(JSON.stringify({
-        ready: this.index !== null,
-        building: this.building,
-        fileCount: this.index ? Object.keys(this.index).length : 0,
-        meta: meta || null,
-        sample: sample.map(([file, bbox]) => ({ file: file.split('/').pop(), ...bbox })),
-      }), {
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    // Read params from query string
-    const release = url.searchParams.get('release');
-    const theme = url.searchParams.get('theme');
-    const type = url.searchParams.get('type');
-
-    if (!release || !theme || !type) {
-      return new Response('Missing release/theme/type params', { status: 400 });
-    }
-
-    const prefix = `release/${release}/theme=${theme}/type=${type}/`;
-
-    // Load from storage if not in memory
-    if (!this.index && !this.building) {
-      const stored = await this.state.storage.get('index');
-      if (stored) {
-        this.index = stored;
-        console.log(`Loaded ${theme}/${type} index from storage: ${Object.keys(this.index).length} files`);
-      }
-    }
-
-    // Build index if needed
-    if (!this.index && !this.building) {
-      this.building = true;
-      try {
-        this.index = await this.buildIndex(prefix, `${theme}/${type}`);
-        await this.state.storage.put('index', this.index);
-        await this.state.storage.put('meta', { release, theme, type, builtAt: new Date().toISOString() });
-        console.log(`Saved ${theme}/${type} index to storage`);
-      } finally {
-        this.building = false;
-      }
-    }
-
-    while (this.building) {
-      await new Promise(r => setTimeout(r, 100));
-    }
-
-    // Filter files by bbox
-    const xmin = parseFloat(url.searchParams.get('xmin'));
-    const xmax = parseFloat(url.searchParams.get('xmax'));
-    const ymin = parseFloat(url.searchParams.get('ymin'));
-    const ymax = parseFloat(url.searchParams.get('ymax'));
-
-    let files = Object.keys(this.index);
-    const totalFiles = files.length;
-
-    if (!isNaN(xmin) && !isNaN(xmax) && !isNaN(ymin) && !isNaN(ymax)) {
-      files = files.filter(f => {
-        const fb = this.index[f];
-        return fb.xmax >= xmin && fb.xmin <= xmax && fb.ymax >= ymin && fb.ymin <= ymax;
-      });
-    }
-
-    return new Response(JSON.stringify(files), {
-      headers: {
-        ...corsHeaders,
-        'Content-Type': 'application/json',
-        'X-Total-Files': totalFiles.toString(),
-        'X-Filtered-Files': files.length.toString(),
-      }
-    });
-  }
-
-  async buildIndex(prefix, label) {
-    console.log(`Building ${label} spatial index...`);
-    const start = Date.now();
-    const files = await listFiles(prefix);
-    const index = {};
-
-    const batchSize = 10;
-    for (let i = 0; i < files.length; i += batchSize) {
-      const batch = files.slice(i, i + batchSize);
-
-      await Promise.all(batch.map(async (file, idx) => {
-        try {
-          const fileUrl = `${S3_BASE}/${file}`;
-          const asyncBuffer = await createAsyncBuffer(fileUrl);
-          const metadata = await parquetMetadataAsync(asyncBuffer);
-          const debug = i === 0 && idx === 0;
-          index[file] = extractBboxFromMetadata(metadata, debug);
-        } catch (e) {
-          console.error(`Error indexing ${file}:`, e.message);
-          index[file] = { xmin: -180, xmax: 180, ymin: -90, ymax: 90 };
-        }
-      }));
-
-      console.log(`${label}: Indexed ${Math.min(i + batchSize, files.length)}/${files.length} files`);
-    }
-
-    console.log(`${label} index built in ${((Date.now() - start) / 1000).toFixed(1)}s for ${files.length} files`);
-    return index;
-  }
-}
-
-async function listFiles(prefix) {
-  let files = [], marker = '';
+async function listS3Files({ release, theme, type }) {
+  const prefix = `release/${release}/theme=${theme}/type=${type}/`;
+  const files = [];
+  let marker = '';
 
   while (true) {
     const listUrl = `${S3_BASE}/?prefix=${prefix}&max-keys=1000${marker ? '&marker=' + marker : ''}`;
-    const response = await fetch(listUrl);
-    const xml = await response.text();
+    const xml = await (await fetch(listUrl)).text();
     const keys = [...xml.matchAll(/<Key>([^<]+)<\/Key>/g)].map(m => m[1]);
     files.push(...keys);
     if (!xml.includes('<IsTruncated>true</IsTruncated>')) break;
@@ -325,54 +250,47 @@ async function listFiles(prefix) {
   return files;
 }
 
+// ── Parquet bbox extraction ─────────────────────────────────────────────────
+
 async function createAsyncBuffer(url) {
   const res = await fetch(url, { method: 'HEAD' });
-  const fileSize = parseInt(res.headers.get('Content-Length'));
-
+  const byteLength = parseInt(res.headers.get('Content-Length'));
   return {
-    byteLength: fileSize,
+    byteLength,
     async slice(start, end) {
-      const res = await fetch(url, {
-        headers: { Range: `bytes=${start}-${end - 1}` }
-      });
+      const res = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` } });
       return await res.arrayBuffer();
-    }
+    },
   };
 }
 
-function extractBboxFromMetadata(metadata, debug = false) {
+function extractBbox(metadata) {
   let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
 
-  for (const rowGroup of (metadata.row_groups || [])) {
-    for (const col of (rowGroup.columns || [])) {
+  for (const rg of metadata.row_groups || []) {
+    for (const col of rg.columns || []) {
       const stats = col.meta_data?.statistics;
-      const pathParts = col.meta_data?.path_in_schema || [];
-      const path = pathParts.join('.').toLowerCase();
-
-      if (debug && path.includes('bbox')) {
-        console.log('Found bbox column:', path, 'stats:', JSON.stringify(stats));
-      }
-
+      const path = (col.meta_data?.path_in_schema || []).join('.').toLowerCase();
       if (!stats) continue;
 
       const minVal = stats.min_value ?? stats.min;
       const maxVal = stats.max_value ?? stats.max;
 
       if (path.includes('xmin') && minVal != null) {
-        const val = typeof minVal === 'number' ? minVal : parseDoubleFromBuffer(minVal);
-        if (!isNaN(val)) xmin = Math.min(xmin, val);
+        const v = typeof minVal === 'number' ? minVal : parseDouble(minVal);
+        if (!isNaN(v)) xmin = Math.min(xmin, v);
       }
       if (path.includes('xmax') && maxVal != null) {
-        const val = typeof maxVal === 'number' ? maxVal : parseDoubleFromBuffer(maxVal);
-        if (!isNaN(val)) xmax = Math.max(xmax, val);
+        const v = typeof maxVal === 'number' ? maxVal : parseDouble(maxVal);
+        if (!isNaN(v)) xmax = Math.max(xmax, v);
       }
       if (path.includes('ymin') && minVal != null) {
-        const val = typeof minVal === 'number' ? minVal : parseDoubleFromBuffer(minVal);
-        if (!isNaN(val)) ymin = Math.min(ymin, val);
+        const v = typeof minVal === 'number' ? minVal : parseDouble(minVal);
+        if (!isNaN(v)) ymin = Math.min(ymin, v);
       }
       if (path.includes('ymax') && maxVal != null) {
-        const val = typeof maxVal === 'number' ? maxVal : parseDoubleFromBuffer(maxVal);
-        if (!isNaN(val)) ymax = Math.max(ymax, val);
+        const v = typeof maxVal === 'number' ? maxVal : parseDouble(maxVal);
+        if (!isNaN(v)) ymax = Math.max(ymax, v);
       }
     }
   }
@@ -381,8 +299,17 @@ function extractBboxFromMetadata(metadata, debug = false) {
   return { xmin, xmax, ymin, ymax };
 }
 
-function parseDoubleFromBuffer(buf) {
+function parseDouble(buf) {
   if (!buf || buf.length < 8) return NaN;
   const view = new DataView(buf.buffer || new Uint8Array(buf).buffer);
   return view.getFloat64(0, true);
 }
+
+// ── Utilities ───────────────────────────────────────────────────────────────
+
+function withCacheHeader(response, value) {
+  const res = new Response(response.body, response);
+  res.headers.set('X-Cache', value);
+  return res;
+}
+
