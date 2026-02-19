@@ -587,6 +587,8 @@ async function loadTheme(key) {
           }
           totalLoaded += newRows.length;
           updateStats();
+          // Yield to browser so it paints the new features before next batch
+          await new Promise(r => setTimeout(r, 0));
         }
       }
       state.bbox = { ...bbox };
