@@ -39,3 +39,27 @@ export function getViewportString() {
   const b = map.getBounds();
   return `${b.getSouth().toFixed(2)},${b.getWest().toFixed(2)} → ${b.getNorth().toFixed(2)},${b.getEast().toFixed(2)} z${map.getZoom()}`;
 }
+
+export function lockMap() {
+  if (!map) return;
+  map.dragging.disable();
+  map.touchZoom.disable();
+  map.doubleClickZoom.disable();
+  map.scrollWheelZoom.disable();
+  map.boxZoom.disable();
+  map.keyboard.disable();
+  if (map.tap) map.tap.disable();
+  map.getContainer().classList.add('map-locked');
+}
+
+export function unlockMap() {
+  if (!map) return;
+  map.dragging.enable();
+  map.touchZoom.enable();
+  map.doubleClickZoom.enable();
+  map.scrollWheelZoom.enable();
+  map.boxZoom.enable();
+  map.keyboard.enable();
+  if (map.tap) map.tap.enable();
+  map.getContainer().classList.remove('map-locked');
+}

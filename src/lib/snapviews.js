@@ -1,6 +1,6 @@
 import L from 'leaflet';
 import { getMap } from './map.js';
-import { snapviews as snapviewsStore } from './stores.js';
+import { useStore } from './store.js';
 import { getThemeColor } from './themes.js';
 
 const SNAPVIEWS_KEY_PREFIX = `overture_snapviews_${location.origin}`;
@@ -16,8 +16,11 @@ export function initSnapviewsLayer() {
   snapviewsLayer = L.layerGroup();
   snapviewsLayer.addTo(map);
 
-  // Subscribe to store changes and sync map overlays
-  snapviewsStore.subscribe(list => syncMapOverlays(list));
+  // Subscribe to snapviews changes and sync map overlays
+  useStore.subscribe(
+    s => s.snapviews,
+    list => syncMapOverlays(list),
+  );
 
   // On zoom/pan, update tooltip visibility (hide when rect fits in viewport)
   map.on('moveend', () => updateTooltipVisibility());
@@ -88,9 +91,9 @@ function loadSnapviewsFromStorage() {
       merged.push(sv);
     }
 
-    snapviewsStore.set(merged);
+    useStore.setState({ snapviews: merged });
   } catch {
-    snapviewsStore.set([]);
+    useStore.setState({ snapviews: [] });
   }
 }
 
@@ -99,12 +102,15 @@ export function saveSnapviews(list) {
 }
 
 // Auto-persist on changes
-snapviewsStore.subscribe(list => {
-  if (currentRelease) saveSnapviews(list);
-});
+useStore.subscribe(
+  s => s.snapviews,
+  list => {
+    if (currentRelease) saveSnapviews(list);
+  },
+);
 
 export function clearSnapviews() {
-  snapviewsStore.set([]);
+  useStore.setState({ snapviews: [] });
   localStorage.removeItem(storageKey());
 }
 
@@ -116,8 +122,7 @@ export function setShowSnapviews(v) {
     overlays.clear();
   } else {
     // Re-sync
-    let list;
-    snapviewsStore.subscribe(l => { list = l; })();
+    const list = useStore.getState().snapviews;
     syncMapOverlays(list || []);
   }
 }
@@ -137,10 +142,11 @@ function getStatusStyle(sv) {
     case 'loading':
       return {
         color: color.stroke,
-        weight: 1.5,
+        weight: 2,
         fillColor: color.fill,
-        fillOpacity: 0.06,
+        fillOpacity: 0.15,
         dashArray: '6 4',
+        className: 'snapview-loading-rect',
         interactive: true,
       };
     case 'done':
@@ -176,13 +182,16 @@ function getTooltipContent(sv) {
   if (sv.status === 'loading') {
     const p = sv.progress;
     const currentType = p.currentKey ? p.currentKey.split('/')[1] : '';
-    // Show file-level progress if available for current key
     const ts = sv.themeStats[p.currentKey];
     let fileInfo = '';
     if (ts && ts.filesTotal) {
       fileInfo = ` (${ts.filesLoaded || 0}/${ts.filesTotal} files)`;
     }
-    return `Loading ${p.loaded}/${p.total}${currentType ? ' \u00b7 ' + currentType : ''}${fileInfo}`;
+    const pct = p.total > 0 ? Math.round((p.loaded / p.total) * 100) : 0;
+    return `<div class="snapview-loading-tooltip">
+      <div class="snapview-loading-bar"><div class="snapview-loading-fill" style="width:${pct}%"></div></div>
+      <span>Loading ${p.loaded}/${p.total}${currentType ? ' \u00b7 ' + currentType : ''}${fileInfo}</span>
+    </div>`;
   }
   if (sv.status === 'error') {
     return `Error: ${sv.error || 'unknown'}`;
@@ -248,7 +257,7 @@ function syncMapOverlays(list) {
       existing.sv = sv;
       existing.rect.setStyle(style);
 
-      // If permanence changed (loading → done), rebind tooltip
+      // If permanence changed (loading -> done), rebind tooltip
       if (existing.permanent !== permanent) {
         existing.rect.unbindTooltip();
         const tooltip = L.tooltip({
