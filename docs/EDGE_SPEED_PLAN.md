@@ -40,37 +40,36 @@ The actual speed comes from reducing remote work (fanout + bytes).
 
 When a theme/type has many Parquet files, the slowest part is often not SQL — it’s the sheer number of HTTP requests.
 
-### Option 1 (local/dev): simplified `/files`
+### POC mode (single-user): lazy edge-built `file -> bbox` index, cached for days
 
-- `/files` returns *all* files for `release/theme/type`
-- DuckDB-WASM does bbox filtering locally via SQL
-- Pros: simplest, robust locally (no Durable Object memory blowups)
-- Cons: more file opens / more metadata reads
+Given constraints:
 
-### Option 2 (production): indexed `/files` via precomputed artifacts
+- *No KV*
+- *No Durable Objects*
+- *No R2 mirroring (keep blobs on Overture S3)*
+- OK with slow first load
 
-Bring back “smart file filtering” **without Durable Objects** by using precomputed artifacts:
+We can still get “smart filtering” by lazily building a `file -> bbox` index **on first use** and caching it at the edge using the **Cache API**.
 
-- Precompute `file -> bbox` for each `{release}/{theme}/{type}`
-- Store as a compact JSON (or similar) artifact
-- Worker loads that small JSON and returns only intersecting files for a bbox
+Flow:
 
-Pros:
-- Massive fanout reduction (best latency win)
-- Predictable worker memory usage
-- No background index-building, no DO complexity
+1) UI calls `GET /releases` to populate a dropdown (cached 1 day)
+2) UI calls `GET /files/:type?release=...&bbox=...`
+3) If the index is missing, Worker returns `202` quickly and starts building the index in the background (`ctx.waitUntil`)
+4) UI shows “Building index…” and polls until it gets `200`
+5) Once cached, requests are fast for days
 
-Cons:
-- Requires a build step to generate + publish artifacts
+Notes:
 
-### Deployment model: feature-flagged modes
+- No locking: worst case we build the same index twice on a cold cache. For “just me”, that’s acceptable.
+- This is a POC-friendly way to keep dev == prod (same Worker code path).
 
-Keep both modes and switch by environment:
+### Alternative modes (later)
 
-- `INDEX_MODE=none` (dev/local): `/files` lists all files
-- `INDEX_MODE=artifact` (prod): `/files` bbox filters using precomputed JSON
+If this ever needs to be public/reliable, we switch to a real artifact pipeline:
 
-This keeps local dev simple and production fast.
+- Generate index artifacts in CI, store in R2, serve instantly
+- Or add DO/KV to coordinate builds + persist indices
 
 ## Cache the boring things hard
 
