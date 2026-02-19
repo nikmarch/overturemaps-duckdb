@@ -1,3 +1,7 @@
 node_modules/
 dist/
 .vite/
+.wrangler/
+
+# local agent/editor settings
+.claude/

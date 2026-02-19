@@ -2,24 +2,20 @@
 
 Browser-based viewer for [Overture Maps](https://overturemaps.org/) data using DuckDB-WASM to query Parquet files directly from S3.
 
-![Screenshot](https://github.com/user-attachments/assets/ae3ff9ad-fbf7-4834-86d0-920fa4ddbe65)
-![Intersection View](https://github.com/user-attachments/assets/45116629-243c-4c42-a5d4-61e74d9dfa66)
-
 ## Features
 
-- Query Overture Maps places and buildings directly in the browser
-- No backend required - DuckDB-WASM runs entirely client-side
-- Filter places by category with live counts
-- Load buildings near places with configurable distance buffer
-- Buildings auto-filter when toggling place categories
-- File list caching in localStorage for faster subsequent loads
+- Browse any Overture Maps release - releases discovered dynamically from S3
+- Load any theme/type (places, buildings, transportation, etc.) onto the map
+- Per-theme row limit controls
+- Spatial file index filters parquet files by viewport bounding box
+- DuckDB-WASM runs entirely client-side - no backend database
 - URL hash preserves map position
 
 ## Architecture
 
-- **Frontend**: Static HTML/JS/CSS served by Cloudflare Pages (or nginx locally)
-- **Worker**: Cloudflare Worker handles CORS proxy + spatial index for Parquet files
-- **Data**: Overture Maps GeoParquet files on S3 (queried directly via HTTP range requests)
+- **Frontend**: Static HTML/JS/CSS served by nginx
+- **Worker**: Cloudflare Worker (wrangler dev locally) handles S3 proxy, release/theme discovery, and spatial index via Durable Objects
+- **Data**: Overture Maps GeoParquet files on S3, queried via HTTP range requests
 
 ## Local Development
 
@@ -27,30 +23,11 @@ Browser-based viewer for [Overture Maps](https://overturemaps.org/) data using D
 docker compose up
 ```
 
-- Frontend: http://zarbazan (nginx on port 80)
-- Worker: http://localhost:8787 (wrangler dev)
-
-Both services start together - no need for multiple terminals.
-
-## Production
-
-Deployed automatically via GitHub Actions:
-- Frontend → Cloudflare Pages
-- Worker → Cloudflare Workers
-
-Live at: [maps.marchen.co](https://maps.marchen.co)
+Open http://localhost:8123
 
 ## Usage
 
-1. Position the map to your area of interest
-2. Adjust the limit slider
-3. Click "Load Places"
-4. Optionally load buildings near places
-5. Use category checkboxes to filter places
-
-## How it works
-
-- Cloudflare Worker proxies S3 requests (CORS) and provides spatial file index
-- DuckDB-WASM with spatial extension queries Parquet files directly
-- Places filtered by bbox, buildings filtered by spatial join with places
-- Category filtering is client-side for instant response
+1. Select a release from the dropdown
+2. Check a theme to load its data for the current viewport
+3. Adjust per-theme limits as needed
+4. Pan/zoom the map and re-check themes to load new areas

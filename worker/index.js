@@ -1,13 +1,6 @@
 import { parquetMetadataAsync } from 'hyparquet';
 
 const S3_BASE = 'https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com';
-const RELEASE = '2026-01-21.0';
-
-// Type mapping: URL type -> Overture theme/type
-const TYPE_MAP = {
-  buildings: { theme: 'buildings', type: 'building' },
-  places: { theme: 'places', type: 'place' },
-};
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -24,37 +17,60 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // GET /files/:type?xmin=...&xmax=...&ymin=...&ymax=...
-    const filesMatch = url.pathname.match(/^\/files\/(buildings|places)$/);
-    if (filesMatch) {
-      const type = filesMatch[1];
-      const id = env.SPATIAL_INDEX.idFromName(type);
-      const stub = env.SPATIAL_INDEX.get(id);
-      return stub.fetch(request);
+    // GET /releases - list available Overture releases
+    if (url.pathname === '/releases') {
+      return handleListReleases();
     }
 
-    // GET /index/clear - clear cached indices
-    if (url.pathname === '/index/clear') {
-      for (const type of ['buildings', 'places']) {
-        const id = env.SPATIAL_INDEX.idFromName(type);
-        const stub = env.SPATIAL_INDEX.get(id);
-        await stub.fetch(new Request('http://internal/clear'));
+    // GET /themes?release=X - list theme/type combos for a release
+    if (url.pathname === '/themes') {
+      const release = url.searchParams.get('release');
+      if (!release) return new Response('Missing release param', { status: 400, headers: corsHeaders });
+      return handleListThemes(release);
+    }
+
+    // GET /files?release=X&theme=Y&type=Z[&xmin=...&xmax=...&ymin=...&ymax=...]
+    // Simplified: return ALL files for the theme/type (no spatial index / no DO), and let DuckDB do bbox filtering.
+    if (url.pathname === '/files') {
+      const release = url.searchParams.get('release');
+      const theme = url.searchParams.get('theme');
+      const type = url.searchParams.get('type');
+      if (!release || !theme || !type) {
+        return new Response('Missing release/theme/type params', { status: 400, headers: corsHeaders });
       }
-      return new Response(JSON.stringify({ cleared: true }), {
+      return handleListFiles(release, theme, type);
+    }
+
+    // GET /index/clear?release=X&theme=Y&type=Z
+    if (url.pathname === '/index/clear') {
+      const release = url.searchParams.get('release');
+      const theme = url.searchParams.get('theme');
+      const type = url.searchParams.get('type');
+      if (!release || !theme || !type) {
+        return new Response('Missing release/theme/type params', { status: 400, headers: corsHeaders });
+      }
+      const doName = `${release}/${theme}/${type}`;
+      const id = env.SPATIAL_INDEX.idFromName(doName);
+      const stub = env.SPATIAL_INDEX.get(id);
+      await stub.fetch(new Request('http://internal/clear'));
+      return new Response(JSON.stringify({ cleared: doName }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
-    // GET /index/status
+    // GET /index/status?release=X&theme=Y&type=Z
     if (url.pathname === '/index/status') {
-      const status = {};
-      for (const type of ['buildings', 'places']) {
-        const id = env.SPATIAL_INDEX.idFromName(type);
-        const stub = env.SPATIAL_INDEX.get(id);
-        const res = await stub.fetch(new Request('http://internal/status'));
-        status[type] = await res.json();
+      const release = url.searchParams.get('release');
+      const theme = url.searchParams.get('theme');
+      const type = url.searchParams.get('type');
+      if (!release || !theme || !type) {
+        return new Response('Missing release/theme/type params', { status: 400, headers: corsHeaders });
       }
-      return new Response(JSON.stringify(status), {
+      const doName = `${release}/${theme}/${type}`;
+      const id = env.SPATIAL_INDEX.idFromName(doName);
+      const stub = env.SPATIAL_INDEX.get(id);
+      const res = await stub.fetch(new Request('http://internal/status'));
+      return new Response(res.body, {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
@@ -63,6 +79,65 @@ export default {
     return handleS3Proxy(request, url);
   }
 };
+
+async function handleListReleases() {
+  const listUrl = `${S3_BASE}/?prefix=release/&delimiter=/`;
+  const response = await fetch(listUrl);
+  const xml = await response.text();
+  const releases = [...xml.matchAll(/<Prefix>release\/([^<]+)\/<\/Prefix>/g)]
+    .map(m => m[1])
+    .sort()
+    .reverse();
+  return new Response(JSON.stringify(releases), {
+    headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600' }
+  });
+}
+
+async function handleListThemes(release) {
+  const prefix = `release/${release}/`;
+  const listUrl = `${S3_BASE}/?prefix=${encodeURIComponent(prefix)}&delimiter=/`;
+  const response = await fetch(listUrl);
+  const xml = await response.text();
+  const themePrefixes = [...xml.matchAll(/<Prefix>([^<]+)<\/Prefix>/g)]
+    .map(m => m[1])
+    .filter(p => p.includes('theme='));
+
+  const results = [];
+  for (const themePrefix of themePrefixes) {
+    const themeMatch = themePrefix.match(/theme=([^/]+)/);
+    if (!themeMatch) continue;
+    const theme = themeMatch[1];
+
+    const typeUrl = `${S3_BASE}/?prefix=${encodeURIComponent(themePrefix)}&delimiter=/`;
+    const typeResponse = await fetch(typeUrl);
+    const typeXml = await typeResponse.text();
+    const types = [...typeXml.matchAll(/<Prefix>[^<]*type=([^/<]+)\/<\/Prefix>/g)]
+      .map(m => m[1]);
+
+    for (const type of types) {
+      results.push({ theme, type });
+    }
+  }
+
+  return new Response(JSON.stringify(results), {
+    headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=3600' }
+  });
+}
+
+async function handleListFiles(release, theme, type) {
+  const prefix = `release/${release}/theme=${theme}/type=${type}/`;
+  const files = await listFiles(prefix);
+  return new Response(JSON.stringify(files), {
+    headers: {
+      ...corsHeaders,
+      'Content-Type': 'application/json',
+      // Old API shape expects both headers; filtered == total in this simplified mode.
+      'X-Total-Files': String(files.length),
+      'X-Filtered-Files': String(files.length),
+      'Cache-Control': 'no-store',
+    }
+  });
+}
 
 async function handleS3Proxy(request, url) {
   const cache = caches.default;
@@ -112,47 +187,51 @@ export class SpatialIndex {
     this.state = state;
     this.index = null;
     this.building = false;
-    this.dataType = null;
   }
 
   async fetch(request) {
     const url = new URL(request.url);
 
-    // Internal clear request
     if (url.pathname === '/clear') {
       this.index = null;
       await this.state.storage.delete('index');
+      await this.state.storage.delete('meta');
       return new Response(JSON.stringify({ cleared: true }), {
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    // Internal status request
     if (url.pathname === '/status') {
+      const meta = await this.state.storage.get('meta');
       const sample = this.index ? Object.entries(this.index).slice(0, 2) : [];
       return new Response(JSON.stringify({
         ready: this.index !== null,
         building: this.building,
         fileCount: this.index ? Object.keys(this.index).length : 0,
+        meta: meta || null,
         sample: sample.map(([file, bbox]) => ({ file: file.split('/').pop(), ...bbox })),
       }), {
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    // Extract data type from path
-    const filesMatch = url.pathname.match(/^\/files\/(buildings|places)$/);
-    if (!filesMatch) {
-      return new Response('Not found', { status: 404 });
+    // Read params from query string
+    const release = url.searchParams.get('release');
+    const theme = url.searchParams.get('theme');
+    const type = url.searchParams.get('type');
+
+    if (!release || !theme || !type) {
+      return new Response('Missing release/theme/type params', { status: 400 });
     }
-    this.dataType = filesMatch[1];
+
+    const prefix = `release/${release}/theme=${theme}/type=${type}/`;
 
     // Load from storage if not in memory
     if (!this.index && !this.building) {
       const stored = await this.state.storage.get('index');
       if (stored) {
         this.index = stored;
-        console.log(`Loaded ${this.dataType} index from storage: ${Object.keys(this.index).length} files`);
+        console.log(`Loaded ${theme}/${type} index from storage: ${Object.keys(this.index).length} files`);
       }
     }
 
@@ -160,15 +239,15 @@ export class SpatialIndex {
     if (!this.index && !this.building) {
       this.building = true;
       try {
-        this.index = await this.buildIndex();
+        this.index = await this.buildIndex(prefix, `${theme}/${type}`);
         await this.state.storage.put('index', this.index);
-        console.log(`Saved ${this.dataType} index to storage`);
+        await this.state.storage.put('meta', { release, theme, type, builtAt: new Date().toISOString() });
+        console.log(`Saved ${theme}/${type} index to storage`);
       } finally {
         this.building = false;
       }
     }
 
-    // Wait if still building
     while (this.building) {
       await new Promise(r => setTimeout(r, 100));
     }
@@ -189,7 +268,7 @@ export class SpatialIndex {
       });
     }
 
-    return new Response(JSON.stringify(files.map(f => `${url.origin}/${f}`)), {
+    return new Response(JSON.stringify(files), {
       headers: {
         ...corsHeaders,
         'Content-Type': 'application/json',
@@ -199,11 +278,10 @@ export class SpatialIndex {
     });
   }
 
-  async buildIndex() {
-    const { theme, type } = TYPE_MAP[this.dataType];
-    console.log(`Building ${this.dataType} spatial index...`);
+  async buildIndex(prefix, label) {
+    console.log(`Building ${label} spatial index...`);
     const start = Date.now();
-    const files = await listFiles(theme, type);
+    const files = await listFiles(prefix);
     const index = {};
 
     const batchSize = 10;
@@ -223,16 +301,15 @@ export class SpatialIndex {
         }
       }));
 
-      console.log(`${this.dataType}: Indexed ${Math.min(i + batchSize, files.length)}/${files.length} files`);
+      console.log(`${label}: Indexed ${Math.min(i + batchSize, files.length)}/${files.length} files`);
     }
 
-    console.log(`${this.dataType} index built in ${((Date.now() - start) / 1000).toFixed(1)}s for ${files.length} files`);
+    console.log(`${label} index built in ${((Date.now() - start) / 1000).toFixed(1)}s for ${files.length} files`);
     return index;
   }
 }
 
-async function listFiles(theme, type) {
-  const prefix = `release/${RELEASE}/theme=${theme}/type=${type}/`;
+async function listFiles(prefix) {
   let files = [], marker = '';
 
   while (true) {

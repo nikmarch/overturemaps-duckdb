@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Overture Maps Browser</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <link rel="stylesheet" href="./style.css">
+  <link rel="stylesheet" href="./style.css?v=4">
 </head>
 <body>
   <div id="map"></div>
@@ -18,48 +18,24 @@
       <button id="collapseBtn" title="Toggle controls">−</button>
     </div>
     <div id="statsBar">
-      <div class="stat"><span class="stat-label">Cached:</span> <span id="cachedStats">-</span></div>
       <div class="stat"><span class="stat-label">Shown:</span> <span id="shownStats">-</span></div>
     </div>
     <div id="controlsBody">
-    <div class="slider-row">
-      <div class="slider-header">
-        <span>Building distance</span>
-        <span class="slider-value" id="distanceValue">0m</span>
+      <div class="select-row">
+        <label for="releaseSelect">Release</label>
+        <select id="releaseSelect" disabled></select>
       </div>
-      <input type="range" id="distanceSlider" min="0" max="100" value="0" step="5">
-    </div>
-    <div class="slider-row">
-      <div class="slider-header">
-        <span>Limit</span>
-        <span class="slider-value" id="limitValue">33,000</span>
+      <div class="checkbox-row">
+        <label><input type="checkbox" id="footprintsCheck" checked> show footprints</label>
+        <label><input type="checkbox" id="intersectionsCheck"> highlight intersections (points)</label>
       </div>
-      <input type="range" id="limitSlider" min="33000" max="1000000" value="33000" step="1000">
-    </div>
-    <div class="radio-row">
-      <label><input type="radio" name="loadMode" value="all"> All files</label>
-      <label><input type="radio" name="loadMode" value="smart" checked> Smart filter</label>
-    </div>
-    <div class="btn-row">
-      <button id="loadPlacesBtn" disabled>Load Places</button>
-      <button id="loadBuildingsBtn" disabled>Load Buildings</button>
-    </div>
-    <label class="checkbox-row"><input type="checkbox" id="intersectCheck"> Find intersections</label>
-    <div id="legend" style="display:none">
-      <div class="legend-item"><span class="dot green"></span> Place inside building</div>
-      <div class="legend-item"><span class="dot red"></span> Place not in building</div>
-      <div class="legend-item"><span class="dot blue"></span> Building (no place inside)</div>
-    </div>
-    <div id="catSection" style="display:none">
-      <div id="catHeader">
-        <span>Categories <span id="catCount"></span></span>
-        <span id="catToggle">▼</span>
+      <div class="btn-row">
+        <button id="clearCacheBtn" type="button" title="Clear local footprints + DuckDB tables + edge index cache">Clear cache</button>
       </div>
-      <div id="categories"></div>
-    </div>
+      <div id="themeList"></div>
     </div>
   </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script type="module" src="./main.js"></script>
+  <script type="module" src="./main.js?v=4"></script>
 </body>
 </html>
