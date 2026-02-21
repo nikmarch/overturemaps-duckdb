@@ -1,9 +1,8 @@
 import { parquetMetadataAsync } from 'hyparquet';
-import { init, DuckDB, sanitizeSql } from '@ducklings/workers';
+import { init, DuckDB } from '@ducklings/workers';
 import wasmModule from '@ducklings/workers/wasm';
 
 const S3_BASE = 'https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com';
-const DATA_HOST = 'https://data.overture/';
 
 // Cache TTLs: production = 1 day, dev/preview = 1 minute
 function cacheTtl(env) {
@@ -39,6 +38,19 @@ function resetDb() {
   try { connInstance = null; dbInstance = null; } catch {}
 }
 
+// Mutex to serialize DuckDB queries within a single isolate.
+// In production each request gets its own isolate so this is a no-op.
+// In local wrangler dev, concurrent requests share one isolate and
+// WASM can't handle parallel queries.
+let queryLock = Promise.resolve();
+
+function withLock(fn) {
+  const prev = queryLock;
+  let resolve;
+  queryLock = new Promise(r => { resolve = r; });
+  return prev.then(fn).finally(resolve);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -49,7 +61,7 @@ export default {
     if (url.pathname === '/releases') return handleReleases(ctx, ttl);
     if (url.pathname === '/themes') return handleThemes(ctx, url, ttl);
     if (url.pathname === '/files') return handleFiles(ctx, url, ttl);
-    if (url.pathname === '/query' && request.method === 'POST') return handleQuery(request);
+    if (url.pathname === '/query' && request.method === 'POST') return handleQuery(request, env);
 
     // S3 proxy: passthrough for /release/... parquet files and listing XML
     return handleS3Proxy(request, ctx, url, ttl);
@@ -58,30 +70,56 @@ export default {
 
 // ── POST /query ──────────────────────────────────────────────────────────────
 
-async function handleQuery(request) {
+async function handleQuery(request, env) {
+  let body;
   try {
-    const body = await request.json();
-    const { sql } = body;
-    if (!sql || typeof sql !== 'string') {
-      return json({ error: 'Missing or invalid "sql" field' }, { status: 400 });
-    }
-
-    // Sanitize: blocks PRAGMA, COPY TO, EXPORT DATABASE, etc.
-    sanitizeSql(sql);
-
-    // Rewrite placeholder host to actual S3 URL
-    const rewrittenSql = sql.replaceAll(DATA_HOST, S3_BASE + '/');
-
-    const conn = await ensureDb();
-    const rows = await conn.query(rewrittenSql);
-
-    return json({ rows, rowCount: rows.length });
+    body = await request.json();
   } catch (e) {
-    // If WASM crashed, reset so next request gets a fresh instance
-    resetDb();
-    const status = e.message?.includes('sanitize') ? 403 : 500;
-    return json({ error: e.message }, { status });
+    return json({ error: 'Invalid JSON' }, { status: 400 });
   }
+
+  const { files, columns, where, limit } = body;
+
+  if (!Array.isArray(files) || !Array.isArray(columns) || !where || !limit) {
+    return json({ error: 'Missing required fields: files, columns, where, limit' }, { status: 400 });
+  }
+
+  if (files.length === 0) {
+    return json({ rows: [], rowCount: 0 });
+  }
+
+  // Stream NDJSON: one line per file as results come in
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
+
+  const streamWork = withLock(async () => {
+    let totalRows = 0;
+    for (let i = 0; i < files.length && totalRows < limit; i++) {
+      try {
+        const remaining = limit - totalRows;
+        const rows = await runQuery([files[i]], columns, where, remaining);
+        totalRows += rows.length;
+        await writer.write(encoder.encode(JSON.stringify({ rows, file: i, total: files.length }) + '\n'));
+      } catch (e) {
+        resetDb();
+        await writer.write(encoder.encode(JSON.stringify({ error: e.message, file: i }) + '\n'));
+      }
+    }
+  });
+
+  streamWork.finally(() => writer.close());
+
+  return new Response(readable, {
+    headers: { 'Content-Type': 'application/x-ndjson', ...corsHeaders },
+  });
+}
+
+async function runQuery(files, columns, where, limit) {
+  const conn = await ensureDb();
+  const fileList = files.map(f => `'${S3_BASE}/${f}'`).join(',');
+  const sql = `SELECT ${columns.join(', ')} FROM read_parquet([${fileList}], hive_partitioning=false) WHERE ${where} LIMIT ${limit}`;
+  return conn.query(sql);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

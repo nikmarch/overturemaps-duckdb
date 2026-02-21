@@ -1,8 +1,8 @@
 import L from 'leaflet';
 import { PROXY, PALETTE_16, THEME_COLORS, DEFAULT_COLOR } from './constants.js';
-import { query, S3_HOST } from './duckdb.js';
+import { query } from './duckdb.js';
 import { getMap, getBbox, bboxContains } from './map.js';
-import { bboxFilter, buildSelectSql } from './query.js';
+import { buildQueryParams } from './query.js';
 import { renderFeature } from './render.js';
 import { darkenHex } from './render.js';
 import { isIntersectionMode, recomputeIntersections } from './intersections.js';
@@ -203,8 +203,7 @@ export async function loadTheme(key, snapviewId) {
       const fileKeys = await filesRes.json();
       const total = filesRes.headers.get('X-Total-Files') || '?';
       const filtered = filesRes.headers.get('X-Filtered-Files') || '?';
-      const fileUrls = fileKeys.map(k => `${S3_HOST}/${k}`);
-      fileCount = fileUrls.length;
+      fileCount = fileKeys.length;
 
       const metaText = `${filtered}/${total}`;
       useStore.setState(s => ({
@@ -212,49 +211,54 @@ export async function loadTheme(key, snapviewId) {
       }));
 
       if (snapviewId) {
-        updateSnapviewTheme(snapviewId, key, { status: 'loading', filesLoaded: 0, filesTotal: fileUrls.length });
+        updateSnapviewTheme(snapviewId, key, { status: 'loading', filesLoaded: 0, filesTotal: fileKeys.length });
       }
 
-      if (fileUrls.length > 0) {
+      if (fileKeys.length > 0) {
         const renderLimit = getRenderLimit(svCap);
 
-        log(`Querying ${type} (${fileUrls.length} files)...`);
-        const { sql, extraFields } = buildSelectSql(key, fileUrls, bbox, limit);
-        const result = await query(sql);
-        const rows = result.rows;
+        log(`Querying ${type} (${fileKeys.length} files)...`);
+        const { params, extraFields } = buildQueryParams(key, fileKeys, bbox, limit);
+        state.extraFields = extraFields;
+        state.cachedRows = [];
 
-        // Parse WKB geometry for each row
-        for (const row of rows) {
-          if (row.geometry_wkb) {
-            const parsed = parseWkb(row.geometry_wkb);
-            if (parsed) {
-              row.geom_type = parsed.geom_type;
-              row.geojson = JSON.stringify(parsed.geojson);
+        let rendered = 0;
+        const result = await query(params, (batchRows, fileIndex, totalFiles) => {
+          // Parse WKB and render progressively as each file completes
+          for (const row of batchRows) {
+            if (row.geometry_wkb) {
+              const parsed = parseWkb(row.geometry_wkb);
+              if (parsed) {
+                row.geom_type = parsed.geom_type;
+                row.geojson = JSON.stringify(parsed.geojson);
+              }
+            }
+            if (row.centroid_lon == null && row.bbox_xmin != null) {
+              row.centroid_lon = (row.bbox_xmin + row.bbox_xmax) / 2;
+              row.centroid_lat = (row.bbox_ymin + row.bbox_ymax) / 2;
             }
           }
-          // Compute centroid from bbox if not already set
-          if (row.centroid_lon == null && row.bbox_xmin != null) {
-            row.centroid_lon = (row.bbox_xmin + row.bbox_xmax) / 2;
-            row.centroid_lat = (row.bbox_ymin + row.bbox_ymax) / 2;
+          state.cachedRows.push(...batchRows);
+
+          // Render this batch (up to remaining budget)
+          const canRender = Math.max(0, renderLimit - rendered);
+          const toRender = batchRows.slice(0, canRender);
+          for (const row of toRender) {
+            renderFeature(row, state, color, extraFields);
           }
-        }
+          rendered += toRender.length;
 
-        // Cache all rows
-        state.cachedRows = rows;
-        state.extraFields = extraFields;
+          log(`${type}: ${fileIndex + 1}/${totalFiles} files, ${state.cachedRows.length} rows`);
+          updateStats();
 
-        // Render up to budget
-        const toRender = rows.slice(0, renderLimit);
-        await renderBatched(toRender, state, color, extraFields);
-        updateStats();
-
-        if (snapviewId) {
-          updateSnapviewTheme(snapviewId, key, {
-            status: 'loading',
-            filesLoaded: fileUrls.length,
-            filesTotal: fileUrls.length,
-          });
-        }
+          if (snapviewId) {
+            updateSnapviewTheme(snapviewId, key, {
+              status: 'loading',
+              filesLoaded: fileIndex + 1,
+              filesTotal: totalFiles,
+            });
+          }
+        });
       }
 
       state.bbox = { ...bbox };

@@ -23,11 +23,11 @@ services:
     build: ./worker
     working_dir: /app
     volumes:
-      - ./worker:/app
-      - worker_node_modules:/app/node_modules
-    command: sh -c "npm install && npx vite build && npx wrangler dev --local --port 8787 --ip 0.0.0.0"
+      - ./worker/src:/app/src:ro
+      - ./worker/wrangler.jsonc:/app/wrangler.jsonc:ro
+      - ./worker/vite.config.js:/app/vite.config.js:ro
+    command: sh -c "npx vite build && npx wrangler dev --local --port 8787 --ip 0.0.0.0"
 
 volumes:
   web_dist:
   ui_node_modules:
-  worker_node_modules:
