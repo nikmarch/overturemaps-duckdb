@@ -22,13 +22,21 @@ const corsHeaders = {
 
 let dbInstance = null;
 let connInstance = null;
+let initDone = false;
 
 async function ensureDb() {
   if (connInstance) return connInstance;
-  await init({ wasmModule });
+  if (!initDone) {
+    await init({ wasmModule });
+    initDone = true;
+  }
   dbInstance = new DuckDB();
   connInstance = dbInstance.connect();
   return connInstance;
+}
+
+function resetDb() {
+  try { connInstance = null; dbInstance = null; } catch {}
 }
 
 export default {
@@ -69,6 +77,8 @@ async function handleQuery(request) {
 
     return json({ rows, rowCount: rows.length });
   } catch (e) {
+    // If WASM crashed, reset so next request gets a fresh instance
+    resetDb();
     const status = e.message?.includes('sanitize') ? 403 : 500;
     return json({ error: e.message }, { status });
   }
