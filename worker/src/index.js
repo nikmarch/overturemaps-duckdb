@@ -1,6 +1,9 @@
 import { parquetMetadataAsync } from 'hyparquet';
+import { init, DuckDB, sanitizeSql } from '@ducklings/workers';
+import wasmModule from '@ducklings/workers/wasm';
 
 const S3_BASE = 'https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com';
+const DATA_HOST = 'https://data.overture/';
 
 // Cache TTLs: production = 1 day, dev/preview = 1 minute
 function cacheTtl(env) {
@@ -9,11 +12,24 @@ function cacheTtl(env) {
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
   'Access-Control-Allow-Headers': '*',
   'Access-Control-Expose-Headers':
     'Content-Length, Content-Range, Accept-Ranges, X-Total-Files, X-Filtered-Files, X-Cache, X-Index-Status, Retry-After',
 };
+
+// ── Lazy DuckDB init (once per isolate) ──────────────────────────────────────
+
+let dbInstance = null;
+let connInstance = null;
+
+async function ensureDb() {
+  if (connInstance) return connInstance;
+  await init({ wasmModule });
+  dbInstance = new DuckDB();
+  connInstance = dbInstance.connect();
+  return connInstance;
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -25,11 +41,38 @@ export default {
     if (url.pathname === '/releases') return handleReleases(ctx, ttl);
     if (url.pathname === '/themes') return handleThemes(ctx, url, ttl);
     if (url.pathname === '/files') return handleFiles(ctx, url, ttl);
+    if (url.pathname === '/query' && request.method === 'POST') return handleQuery(request);
 
     // S3 proxy: passthrough for /release/... parquet files and listing XML
     return handleS3Proxy(request, ctx, url, ttl);
   },
 };
+
+// ── POST /query ──────────────────────────────────────────────────────────────
+
+async function handleQuery(request) {
+  try {
+    const body = await request.json();
+    const { sql } = body;
+    if (!sql || typeof sql !== 'string') {
+      return json({ error: 'Missing or invalid "sql" field' }, { status: 400 });
+    }
+
+    // Sanitize: blocks PRAGMA, COPY TO, EXPORT DATABASE, etc.
+    sanitizeSql(sql);
+
+    // Rewrite placeholder host to actual S3 URL
+    const rewrittenSql = sql.replaceAll(DATA_HOST, S3_BASE + '/');
+
+    const conn = await ensureDb();
+    const rows = await conn.query(rewrittenSql);
+
+    return json({ rows, rowCount: rows.length });
+  } catch (e) {
+    const status = e.message?.includes('sanitize') ? 403 : 500;
+    return json({ error: e.message }, { status });
+  }
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -85,7 +128,6 @@ function extractReleases(xml) {
 }
 
 // ── GET /themes?release=X ───────────────────────────────────────────────────
-// Returns [{theme, type}, ...] by listing S3 prefixes for a release.
 
 async function handleThemes(ctx, url, ttl) {
   const release = url.searchParams.get('release');
@@ -96,15 +138,12 @@ async function handleThemes(ctx, url, ttl) {
   const hit = await cache.match(key);
   if (hit) return withCacheHeader(hit, 'HIT');
 
-  // List theme= prefixes under this release
   const listUrl = `${S3_BASE}/?prefix=release/${release}/&delimiter=/&max-keys=1000`;
   const xml = await (await fetch(listUrl)).text();
 
-  // Prefixes look like: release/2026-02-18.0/theme=buildings/
   const themePrefixes = [...xml.matchAll(/<Prefix>(release\/[^<]+)<\/Prefix>/g)].map(m => m[1]);
   const themes = [];
 
-  // For each theme, list type= prefixes
   for (const tp of themePrefixes) {
     const themeMatch = tp.match(/theme=([^/]+)/);
     if (!themeMatch) continue;
@@ -128,7 +167,6 @@ async function handleThemes(ctx, url, ttl) {
 }
 
 // ── GET /files?release=X&theme=T&type=Y[&xmin&xmax&ymin&ymax] ──────────────
-// Lists parquet files, optionally filtered by bbox using parquet metadata.
 
 async function handleFiles(ctx, url, ttl) {
   const release = url.searchParams.get('release');
@@ -147,8 +185,6 @@ async function handleFiles(ctx, url, ttl) {
   if (hit) {
     index = hit.data;
   } else {
-    // No cached index – list files and return them all immediately.
-    // Build the bbox index in the background so subsequent requests can filter.
     const files = await listS3Files({ release, theme, type });
     index = Object.fromEntries(files.map(f => [f, { xmin: -180, xmax: 180, ymin: -90, ymax: 90 }]));
     indexReady = false;
@@ -178,7 +214,6 @@ async function handleFiles(ctx, url, ttl) {
     });
   }
 
-  // Return bare S3 keys (UI prepends origin)
   return json(files, {
     headers: {
       'X-Total-Files': totalFiles.toString(),
@@ -321,4 +356,3 @@ function withCacheHeader(response, value) {
   res.headers.set('X-Cache', value);
   return res;
 }
-

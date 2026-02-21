@@ -4,7 +4,6 @@ import LoadModal from './components/LoadModal';
 import StatusBar from './components/StatusBar';
 import { loadArea } from '../lib/controller.js';
 import { initMap } from '../lib/map.js';
-import { initDuckDB } from '../lib/duckdb.js';
 import { loadReleases } from '../lib/themes.js';
 import { initSnapviewsLayer } from '../lib/snapviews.js';
 import { onMapMove } from '../lib/controller.js';
@@ -17,8 +16,7 @@ export default function App() {
   useEffect(() => {
     async function init() {
       try {
-        useStore.setState({ status: { text: 'Loading DuckDB...', type: 'loading' } });
-        await initDuckDB();
+        useStore.setState({ status: { text: 'Initializing...', type: 'loading' } });
 
         const map = initMap('map');
         initSnapviewsLayer();

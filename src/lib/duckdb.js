@@ -1,34 +1,16 @@
-import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
+import { PROXY } from './constants.js';
 
-let db = null;
-let conn = null;
+export const S3_HOST = 'https://data.overture';
 
-export async function initDuckDB() {
-  const bundles = duckdb.getJsDelivrBundles();
-  const bundle = await duckdb.selectBundle(bundles);
-  const worker = new Worker(URL.createObjectURL(
-    new Blob([`importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' })
-  ));
-  db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
-  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
-  conn = await db.connect();
-  await conn.query('INSTALL spatial; LOAD spatial;');
-  return conn;
-}
-
-export function getConn() {
-  return conn;
-}
-
-export function getDb() {
-  return db;
-}
-
-export async function dropAllTables() {
-  if (!conn) return;
-  const tables = (await conn.query('SHOW TABLES')).toArray().map(t => t.name);
-  for (const t of tables) {
-    if (!t) continue;
-    await conn.query(`DROP TABLE IF EXISTS "${t}"`);
+export async function query(sql) {
+  const res = await fetch(`${PROXY}/query`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `Query failed: ${res.status}`);
   }
+  return res.json();
 }
