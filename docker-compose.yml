@@ -20,7 +20,7 @@ services:
       - worker
 
   worker:
-    image: node:22-slim
+    build: ./worker
     working_dir: /app
     volumes:
       - ./worker:/app
