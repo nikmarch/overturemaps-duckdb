@@ -4,13 +4,25 @@ export function bboxFilter(bbox) {
   return `bbox.xmax >= ${bbox.xmin} AND bbox.xmin <= ${bbox.xmax} AND bbox.ymax >= ${bbox.ymin} AND bbox.ymin <= ${bbox.ymax}`;
 }
 
+// Themes whose parquet files include a `names` struct column
+const HAS_NAMES = new Set([
+  'places/place', 'buildings/building', 'buildings/building_part',
+  'transportation/segment', 'base/infrastructure', 'base/land',
+  'base/land_use', 'base/water', 'divisions/division',
+  'divisions/division_area',
+]);
+
 export function buildQueryParams(key, files, bbox, limit) {
   const defs = THEME_FIELDS[key] || [];
   const extraFields = defs;
 
+  const displayNameCol = HAS_NAMES.has(key)
+    ? "COALESCE(CAST(names.primary AS VARCHAR), '') as display_name"
+    : "'' as display_name";
+
   const columns = [
     'id',
-    "COALESCE(CAST(names.primary AS VARCHAR), '') as display_name",
+    displayNameCol,
     'hex(geometry) as geometry_wkb',
     'bbox.xmin as bbox_xmin',
     'bbox.xmax as bbox_xmax',

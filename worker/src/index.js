@@ -1,5 +1,5 @@
 import { parquetMetadataAsync } from 'hyparquet';
-import { init, DuckDB } from '@ducklings/workers';
+import { init, DuckDB, tableToIPC } from '@ducklings/workers';
 import wasmModule from '@ducklings/workers/wasm';
 
 const S3_BASE = 'https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com';
@@ -14,7 +14,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
   'Access-Control-Allow-Headers': '*',
   'Access-Control-Expose-Headers':
-    'Content-Length, Content-Range, Accept-Ranges, X-Total-Files, X-Filtered-Files, X-Cache, X-Index-Status, Retry-After',
+    'Content-Length, Content-Range, Accept-Ranges, X-Total-Files, X-Filtered-Files, X-Cache, X-Index-Status, X-Row-Count, Retry-After',
 };
 
 // ── Lazy DuckDB init (once per isolate) ──────────────────────────────────────
@@ -31,6 +31,7 @@ async function ensureDb() {
   }
   dbInstance = new DuckDB();
   connInstance = dbInstance.connect();
+  connInstance.query("SET memory_limit = '100MB'");
   return connInstance;
 }
 
@@ -61,16 +62,52 @@ export default {
     if (url.pathname === '/releases') return handleReleases(ctx, ttl);
     if (url.pathname === '/themes') return handleThemes(ctx, url, ttl);
     if (url.pathname === '/files') return handleFiles(ctx, url, ttl);
-    if (url.pathname === '/query' && request.method === 'POST') return handleQuery(request, env);
+    if (url.pathname === '/query/exec' && request.method === 'POST') return handleQueryExec(request);
+    if (url.pathname === '/query' && request.method === 'POST') return handleQuery(request);
 
     // S3 proxy: passthrough for /release/... parquet files and listing XML
     return handleS3Proxy(request, ctx, url, ttl);
   },
 };
 
-// ── POST /query ──────────────────────────────────────────────────────────────
+// ── POST /query/exec — single-file Arrow IPC executor ───────────────────────
 
-async function handleQuery(request, env) {
+async function handleQueryExec(request) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return json({ error: 'Invalid JSON' }, { status: 400 });
+  }
+
+  const { file, columns, where, limit } = body;
+  if (!file || !Array.isArray(columns) || !where || !limit) {
+    return json({ error: 'Missing required fields: file, columns, where, limit' }, { status: 400 });
+  }
+
+  try {
+    const table = await withLock(() => runQueryArrow(file, columns, where, limit));
+    const ipc = tableToIPC(table, { format: 'stream' });
+    return new Response(ipc, {
+      headers: {
+        'Content-Type': 'application/vnd.apache.arrow.stream',
+        'X-Row-Count': String(table.numRows),
+        ...corsHeaders,
+      },
+    });
+  } catch (e) {
+    resetDb();
+    return json({ error: e.message }, { status: 500 });
+  }
+}
+
+// ── POST /query — orchestrator (streams framed Arrow IPC) ───────────────────
+// Binary frame format per file:
+//   [4-byte LE uint32 length][Arrow IPC bytes]
+// Error frame:
+//   [4-byte 0x00000000][4-byte LE error-json-length][error JSON bytes]
+
+async function handleQuery(request) {
   let body;
   try {
     body = await request.json();
@@ -85,41 +122,60 @@ async function handleQuery(request, env) {
   }
 
   if (files.length === 0) {
-    return json({ rows: [], rowCount: 0 });
+    return new Response(new Uint8Array(0), {
+      headers: { 'Content-Type': 'application/vnd.apache.arrow.stream', ...corsHeaders },
+    });
   }
 
-  // Stream NDJSON: one line per file as results come in
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
-  const encoder = new TextEncoder();
+
+  // Cap per-file rows to avoid OOM in the 128MB worker isolate.
+  // Geometry blobs + hex() are the biggest memory consumers.
+  const PER_FILE_MAX = 5000;
 
   const streamWork = withLock(async () => {
     let totalRows = 0;
     for (let i = 0; i < files.length && totalRows < limit; i++) {
       try {
-        const remaining = limit - totalRows;
-        const rows = await runQuery([files[i]], columns, where, remaining);
-        totalRows += rows.length;
-        await writer.write(encoder.encode(JSON.stringify({ rows, file: i, total: files.length }) + '\n'));
+        const remaining = Math.min(limit - totalRows, PER_FILE_MAX);
+        const table = await runQueryArrow(files[i], columns, where, remaining);
+        const ipcBytes = new Uint8Array(tableToIPC(table, { format: 'stream' }));
+        totalRows += table.numRows;
+
+        // Write data frame: [4-byte length][Arrow IPC bytes]
+        const lenBuf = new ArrayBuffer(4);
+        new DataView(lenBuf).setUint32(0, ipcBytes.byteLength, true);
+        await writer.write(new Uint8Array(lenBuf));
+        await writer.write(ipcBytes);
       } catch (e) {
         resetDb();
-        await writer.write(encoder.encode(JSON.stringify({ error: e.message, file: i }) + '\n'));
+        // Write error frame: [4-byte 0x00000000][4-byte error-json-length][error JSON]
+        const errJson = new TextEncoder().encode(JSON.stringify({ error: e.message, file: i }));
+        const errHeader = new ArrayBuffer(8);
+        const errView = new DataView(errHeader);
+        errView.setUint32(0, 0, true); // zero signals error frame
+        errView.setUint32(4, errJson.byteLength, true);
+        await writer.write(new Uint8Array(errHeader));
+        await writer.write(errJson);
       }
+      // Free WASM memory between files to stay within 128MB isolate
+      resetDb();
     }
   });
 
   streamWork.finally(() => writer.close());
 
   return new Response(readable, {
-    headers: { 'Content-Type': 'application/x-ndjson', ...corsHeaders },
+    headers: { 'Content-Type': 'application/vnd.apache.arrow.stream', ...corsHeaders },
   });
 }
 
-async function runQuery(files, columns, where, limit) {
+async function runQueryArrow(file, columns, where, limit) {
   const conn = await ensureDb();
-  const fileList = files.map(f => `'${S3_BASE}/${f}'`).join(',');
-  const sql = `SELECT ${columns.join(', ')} FROM read_parquet([${fileList}], hive_partitioning=false) WHERE ${where} LIMIT ${limit}`;
-  return conn.query(sql);
+  const url = `'${S3_BASE}/${file}'`;
+  const sql = `SELECT ${columns.join(', ')} FROM read_parquet([${url}], hive_partitioning=false) WHERE ${where} LIMIT ${limit}`;
+  return conn.queryArrow(sql);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
