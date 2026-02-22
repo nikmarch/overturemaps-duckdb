@@ -10,11 +10,12 @@ import { PROXY } from './constants.js';
  * Calls onBatch(rows, fileIndex, totalFiles) as each file completes.
  * Returns the full collected rows array.
  */
-export async function query(params, onBatch) {
+export async function query(params, onBatch, { signal } = {}) {
   const res = await fetch(`${PROXY}/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
+    signal,
   });
 
   if (!res.ok) {

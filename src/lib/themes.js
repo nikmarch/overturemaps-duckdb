@@ -18,6 +18,7 @@ import {
 export const themeState = {};
 export let currentRelease = null;
 const THEME_KEY_COLORS = {};
+const themeAbort = {}; // per-theme AbortController to cancel stale requests
 
 function log(msg, type = 'loading') {
   useStore.setState({ status: { text: msg, type } });
@@ -170,6 +171,11 @@ async function renderBatched(rows, state, color, extraFields) {
 }
 
 export async function loadTheme(key, snapviewId) {
+  // Cancel any in-flight requests for this theme
+  if (themeAbort[key]) themeAbort[key].abort();
+  const ac = new AbortController();
+  themeAbort[key] = ac;
+
   const [theme, type] = key.split('/');
   const state = themeState[key];
   const bbox = getBbox();
@@ -199,7 +205,7 @@ export async function loadTheme(key, snapviewId) {
       log(`Loading ${type}...`);
 
       const filesUrl = `${PROXY}/files?release=${currentRelease}&theme=${theme}&type=${type}&xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
-      const filesRes = await fetch(filesUrl);
+      const filesRes = await fetch(filesUrl, { signal: ac.signal });
       const fileKeys = await filesRes.json();
       const total = filesRes.headers.get('X-Total-Files') || '?';
       const filtered = filesRes.headers.get('X-Filtered-Files') || '?';
@@ -265,7 +271,7 @@ export async function loadTheme(key, snapviewId) {
                 filesTotal: totalFiles,
               });
             }
-          });
+          }, { signal: ac.signal });
 
           log(`${type}: tile ${t + 1}/${tiles.length}, ${state.cachedRows.length} rows`);
         }
@@ -304,6 +310,7 @@ export async function loadTheme(key, snapviewId) {
 
     log(`${rowCount.toLocaleString()} ${type} (${formatDuration(loadTimeMs)})`, 'success');
   } catch (e) {
+    if (e.name === 'AbortError') return; // cancelled by a newer loadTheme call
     log(`Error loading ${type}: ${e.message}`, 'error');
     console.error(e);
     if (snapviewId) {
