@@ -1,5 +1,4 @@
 import { PROXY } from './constants.js';
-import { dropAllTables } from './duckdb.js';
 import { getMap, getBbox, getViewportString, bboxContains, lockMap, unlockMap } from './map.js';
 import {
   onReleaseChange, toggleTheme, setThemeLimit,
@@ -47,11 +46,9 @@ function findSupersetSnapview(bbox, key) {
 
 // Get or create a snapview for the current bbox
 function getOrCreateActiveSnapview(bbox, keys) {
-  // If there's an active loading snapview whose bbox contains the current one, reuse it
   if (activeSnapviewId) {
     const sv = getSnapview(activeSnapviewId);
     if (sv && sv.status === 'loading' && bboxContains(sv.bbox, bbox)) {
-      // Add any new keys
       for (const key of keys) {
         if (!sv.keys.includes(key)) {
           addSnapviewKey(activeSnapviewId, key);
@@ -61,7 +58,6 @@ function getOrCreateActiveSnapview(bbox, keys) {
     }
   }
 
-  // Create a new snapview
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
   createSnapview(id, bbox, keys);
   return id;
@@ -70,7 +66,6 @@ function getOrCreateActiveSnapview(bbox, keys) {
 export function deleteSnapview(snapviewId) {
   const sv = getSnapview(snapviewId);
 
-  // If this is the active snapview, disable its themes from the map
   if (activeSnapviewId === snapviewId) {
     if (sv) {
       for (const key of sv.keys) {
@@ -120,13 +115,10 @@ export function manualToggleTheme(key, enabled) {
   if (enabled) {
     const bbox = getBbox();
 
-    // If an existing snapview already has this key loaded at a superset bbox,
-    // just enable from cache — no new snapview needed
     const superset = findSupersetSnapview(bbox, key);
     if (superset && superset.status === 'done') {
       activeSnapviewId = superset.id;
       useStore.setState({ activeSnapview: superset.id });
-      // toggleTheme will use cache path (bboxContains check in loadTheme)
       toggleTheme(key, true, superset.id);
       return;
     }
@@ -138,12 +130,10 @@ export function manualToggleTheme(key, enabled) {
     activeSnapviewId = svId;
     useStore.setState({ activeSnapview: svId });
 
-    // Fire-and-forget: toggleTheme no longer awaits
     toggleTheme(key, true, svId);
   } else {
     toggleTheme(key, false);
 
-    // Update active snapview keys
     if (activeSnapviewId) {
       removeSnapviewKey(activeSnapviewId, key);
     }
@@ -160,7 +150,6 @@ export async function restoreSnapview(snapview) {
   const map = getMap();
   const { bbox, keys } = snapview;
 
-  // Disable all currently enabled themes
   for (const key of Object.keys(themeState)) {
     if (themeState[key].enabled) {
       disableTheme(key);
@@ -170,24 +159,19 @@ export async function restoreSnapview(snapview) {
   activeSnapviewId = snapview.id;
   useStore.setState({ activeSnapview: snapview.id });
 
-  // Zoom to the snapview bbox
   map.fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [0, 0] });
 
-  // Wait for the map to settle
   await new Promise(r => setTimeout(r, 100));
 
-  // Try to enable from DuckDB cache first; fall back to fresh load for each key
   const validKeys = keys.filter(k => themeState[k]);
   let restoredFromCache = 0;
 
   for (const key of validKeys) {
     const state = themeState[key];
-    // Check if DuckDB table exists (has cached data from this session)
-    if (state && bboxContains(state.bbox, bbox)) {
+    if (state && bboxContains(state.bbox, bbox) && state.cachedRows) {
       await enableThemeFromCache(key, bbox, snapview.cap);
       restoredFromCache++;
     } else {
-      // No cache — fire a fresh load (non-blocking)
       toggleTheme(key, true, snapview.id);
     }
   }
@@ -195,13 +179,12 @@ export async function restoreSnapview(snapview) {
   if (restoredFromCache === validKeys.length) {
     useStore.setState({ status: { text: `Restored ${validKeys.length} theme${validKeys.length > 1 ? 's' : ''}`, type: 'success' } });
   }
-  // If some themes needed fresh loads, the loading overlay will show progress
 }
 
 export async function clearCache() {
   if (!currentRelease) return;
 
-  if (!confirm('Clear cache? This will:\n\u2022 clear snapviews (localStorage)\n\u2022 drop local DuckDB tables\n\u2022 clear edge spatial index for all themes')) {
+  if (!confirm('Clear cache? This will:\n\u2022 clear snapviews (localStorage)\n\u2022 clear local data caches')) {
     return;
   }
 
@@ -212,15 +195,7 @@ export async function clearCache() {
 
   clearSnapviews();
   clearIntersectionState();
-  await dropAllTables();
   clearAllThemes();
-
-  const requests = Object.keys(themeState).map((key) => {
-    const [theme, type] = key.split('/');
-    const url = `${PROXY}/index/clear?release=${encodeURIComponent(currentRelease)}&theme=${encodeURIComponent(theme)}&type=${encodeURIComponent(type)}`;
-    return fetch(url).catch(() => null);
-  });
-  await Promise.all(requests);
 
   updateStats();
   useStore.setState({ status: { text: 'Cache cleared', type: 'success' } });
@@ -236,7 +211,6 @@ export async function toggleSnapviewTheme(snapviewId, key, enabled) {
   if (!sv) return;
 
   if (enabled) {
-    // Always disable first to reset state cleanly
     disableTheme(key);
 
     activeSnapviewId = snapviewId;
@@ -244,7 +218,7 @@ export async function toggleSnapviewTheme(snapviewId, key, enabled) {
     useStore.setState({ status: { text: `Loading ${key.split('/')[1]}...`, type: 'loading' } });
 
     const state = themeState[key];
-    if (state && bboxContains(state.bbox, sv.bbox)) {
+    if (state && bboxContains(state.bbox, sv.bbox) && state.cachedRows) {
       await enableThemeFromCache(key, sv.bbox, sv.cap);
     } else {
       toggleTheme(key, true, snapviewId);
@@ -258,7 +232,6 @@ export async function toggleSnapviewTheme(snapviewId, key, enabled) {
 export async function onSnapviewCapChange(snapviewId, cap) {
   updateSnapviewCap(snapviewId, cap);
 
-  // If this is the active snapview, re-render all enabled themes with the new cap
   if (activeSnapviewId === snapviewId) {
     useStore.setState({ status: { text: 'Re-rendering...', type: 'loading' } });
     await rerenderAllEnabled(cap);

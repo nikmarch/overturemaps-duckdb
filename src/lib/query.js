@@ -4,23 +4,37 @@ export function bboxFilter(bbox) {
   return `bbox.xmax >= ${bbox.xmin} AND bbox.xmin <= ${bbox.xmax} AND bbox.ymax >= ${bbox.ymin} AND bbox.ymin <= ${bbox.ymax}`;
 }
 
-export async function getFieldsForTable(conn, tableName, key) {
-  const cols = (await conn.query(`SELECT column_name FROM information_schema.columns WHERE table_name='${tableName}'`)).toArray();
-  const colNames = new Set(cols.map(c => c.column_name));
+// Themes whose parquet files include a `names` struct column
+const HAS_NAMES = new Set([
+  'places/place', 'buildings/building', 'buildings/building_part',
+  'transportation/segment', 'base/infrastructure', 'base/land',
+  'base/land_use', 'base/water', 'divisions/division',
+  'divisions/division_area',
+]);
 
-  let nameExpr = 'NULL';
-  if (colNames.has('names')) nameExpr = 'names.primary';
-  else if (colNames.has('name')) nameExpr = 'name';
-
+export function buildQueryParams(key, files, bbox, limit) {
   const defs = THEME_FIELDS[key] || [];
-  const extraFields = defs.filter(f => colNames.has(f.col));
+  const extraFields = defs;
 
-  const selectParts = [
+  const displayNameCol = HAS_NAMES.has(key)
+    ? "COALESCE(CAST(names.primary AS VARCHAR), '') as display_name"
+    : "'' as display_name";
+
+  const columns = [
     'id',
-    `COALESCE(CAST(${nameExpr} AS VARCHAR), '') as display_name`,
-    'geom_type', 'geojson', 'centroid_lon', 'centroid_lat',
+    displayNameCol,
+    'hex(geometry) as geometry_wkb',
+    'bbox.xmin as bbox_xmin',
+    'bbox.xmax as bbox_xmax',
+    'bbox.ymin as bbox_ymin',
+    'bbox.ymax as bbox_ymax',
+    '(bbox.xmin + bbox.xmax) / 2 as centroid_lon',
+    '(bbox.ymin + bbox.ymax) / 2 as centroid_lat',
     ...extraFields.map((f, i) => `CAST(${f.sql} AS VARCHAR) as _f${i}`),
   ];
 
-  return { selectParts, extraFields };
+  return {
+    params: { files, columns, where: bboxFilter(bbox), limit },
+    extraFields,
+  };
 }

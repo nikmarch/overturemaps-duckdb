@@ -32,8 +32,12 @@ jobs:
         run: npm install
         working-directory: worker
 
+      - name: Build Worker
+        run: npx vite build
+        working-directory: worker
+
       - name: Deploy Worker
-        run: npx wrangler deploy
+        run: npx wrangler deploy --config dist/overture_s3_proxy/wrangler.json
         working-directory: worker
 
       - name: Build frontend
