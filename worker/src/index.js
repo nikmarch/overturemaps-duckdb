@@ -29,14 +29,16 @@ async function ensureDb() {
     await init({ wasmModule });
     initDone = true;
   }
-  dbInstance = new DuckDB();
+  dbInstance = new DuckDB({ customConfig: { memory_limit: '100MB' } });
   connInstance = dbInstance.connect();
-  connInstance.query("SET memory_limit = '100MB'");
   return connInstance;
 }
 
 function resetDb() {
-  try { connInstance = null; dbInstance = null; } catch {}
+  try { if (connInstance) connInstance.close(); } catch {}
+  try { if (dbInstance) dbInstance.close(); } catch {}
+  connInstance = null;
+  dbInstance = null;
 }
 
 // Mutex to serialize DuckDB queries within a single isolate.
@@ -130,15 +132,15 @@ async function handleQuery(request) {
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
 
-  // Cap per-file rows to avoid OOM in the 128MB worker isolate.
-  // Geometry blobs + hex() are the biggest memory consumers.
-  const PER_FILE_MAX = 5000;
+  // Adaptive per-file row cap: starts at 5000, scales up on success (max 10000),
+  // halves on OOM (floor 500). Retries the same file once with a smaller limit.
+  let perFileMax = 5000;
 
   const streamWork = withLock(async () => {
     let totalRows = 0;
     for (let i = 0; i < files.length && totalRows < limit; i++) {
+      const remaining = Math.min(limit - totalRows, perFileMax);
       try {
-        const remaining = Math.min(limit - totalRows, PER_FILE_MAX);
         const table = await runQueryArrow(files[i], columns, where, remaining);
         const ipcBytes = new Uint8Array(tableToIPC(table, { format: 'stream' }));
         totalRows += table.numRows;
@@ -148,8 +150,19 @@ async function handleQuery(request) {
         new DataView(lenBuf).setUint32(0, ipcBytes.byteLength, true);
         await writer.write(new Uint8Array(lenBuf));
         await writer.write(ipcBytes);
+
+        // Success — try increasing limit for next file (up to 10000)
+        if (perFileMax < 10000) perFileMax = Math.min(perFileMax * 2, 10000);
       } catch (e) {
         resetDb();
+
+        if (e.message?.includes('Out of Memory') && remaining > 500) {
+          // Halve the limit and retry this file
+          perFileMax = Math.max(500, Math.floor(remaining / 2));
+          i--; // retry same file
+          continue;
+        }
+
         // Write error frame: [4-byte 0x00000000][4-byte error-json-length][error JSON]
         const errJson = new TextEncoder().encode(JSON.stringify({ error: e.message, file: i }));
         const errHeader = new ArrayBuffer(8);
