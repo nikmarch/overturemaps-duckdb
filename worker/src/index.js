@@ -67,6 +67,14 @@ export default {
     if (url.pathname === '/query/exec' && request.method === 'POST') return handleQueryExec(request);
     if (url.pathname === '/query' && request.method === 'POST') return handleQuery(request);
 
+    // Tile endpoint: deterministic grid cells for CDN caching
+    const tilesMatch = url.pathname.match(
+      /^\/tiles\/([^/]+\/[^/]+)\/([\d.]+)\/(-?[\d.]+)\/(-?[\d.]+)\.arrow$/
+    );
+    if (tilesMatch && request.method === 'GET') {
+      return handleTile(ctx, url, tilesMatch, ttl);
+    }
+
     // S3 proxy: passthrough for /release/... parquet files and listing XML
     return handleS3Proxy(request, ctx, url, ttl);
   },
@@ -285,14 +293,7 @@ async function handleThemes(ctx, url, ttl) {
 
 // ── GET /files?release=X&theme=T&type=Y[&xmin&xmax&ymin&ymax] ──────────────
 
-async function handleFiles(ctx, url, ttl) {
-  const release = url.searchParams.get('release');
-  const theme = url.searchParams.get('theme');
-  const type = url.searchParams.get('type');
-  if (!release || !theme || !type) {
-    return json({ error: 'Missing required params: release, theme, type' }, { status: 400 });
-  }
-
+async function getFilteredFiles(ctx, release, theme, type, bbox, ttl) {
   const cache = caches.default;
   const indexKey = cacheKey('index', [release, theme, type]);
   const hit = await cachedJson(cache, indexKey);
@@ -316,28 +317,244 @@ async function handleFiles(ctx, url, ttl) {
     );
   }
 
+  let files = Object.keys(index);
+  const totalFiles = files.length;
+
+  if (indexReady && bbox) {
+    files = files.filter(f => {
+      const b = index[f];
+      return b.xmax >= bbox.xmin && b.xmin <= bbox.xmax && b.ymax >= bbox.ymin && b.ymin <= bbox.ymax;
+    });
+  }
+
+  return { files, totalFiles, indexReady, cacheHit: !!hit };
+}
+
+async function handleFiles(ctx, url, ttl) {
+  const release = url.searchParams.get('release');
+  const theme = url.searchParams.get('theme');
+  const type = url.searchParams.get('type');
+  if (!release || !theme || !type) {
+    return json({ error: 'Missing required params: release, theme, type' }, { status: 400 });
+  }
+
   const xmin = parseFloat(url.searchParams.get('xmin'));
   const xmax = parseFloat(url.searchParams.get('xmax'));
   const ymin = parseFloat(url.searchParams.get('ymin'));
   const ymax = parseFloat(url.searchParams.get('ymax'));
 
-  let files = Object.keys(index);
-  const totalFiles = files.length;
+  const bbox = (!isNaN(xmin) && !isNaN(xmax) && !isNaN(ymin) && !isNaN(ymax))
+    ? { xmin, xmax, ymin, ymax } : null;
 
-  if (indexReady && !isNaN(xmin) && !isNaN(xmax) && !isNaN(ymin) && !isNaN(ymax)) {
-    files = files.filter(f => {
-      const b = index[f];
-      return b.xmax >= xmin && b.xmin <= xmax && b.ymax >= ymin && b.ymin <= ymax;
-    });
-  }
+  const { files, totalFiles, indexReady, cacheHit } = await getFilteredFiles(ctx, release, theme, type, bbox, ttl);
 
   return json(files, {
     headers: {
       'X-Total-Files': totalFiles.toString(),
       'X-Filtered-Files': files.length.toString(),
-      'X-Cache': hit ? 'HIT' : 'MISS',
+      'X-Cache': cacheHit ? 'HIT' : 'MISS',
       'X-Index-Status': indexReady ? 'ready' : 'building',
       'Cache-Control': 'no-store',
+    },
+  });
+}
+
+// ── Tile theme constants (mirrored from src/lib/constants.js + query.js) ─────
+
+const TILE_THEME_FIELDS = {
+  'places/place': [
+    { sql: 'categories.primary', label: 'Category' },
+    { sql: 'ROUND(confidence, 2)', label: 'Confidence' },
+    { sql: 'websites[1]', label: 'Website' },
+    { sql: 'phones[1]', label: 'Phone' },
+  ],
+  'buildings/building': [
+    { sql: 'subtype', label: 'Subtype' },
+    { sql: 'class', label: 'Class' },
+    { sql: 'ROUND(height, 1)', label: 'Height' },
+    { sql: 'num_floors', label: 'Floors' },
+  ],
+  'buildings/building_part': [
+    { sql: 'ROUND(height, 1)', label: 'Height' },
+    { sql: 'num_floors', label: 'Floors' },
+  ],
+  'addresses/address': [
+    { sql: 'number', label: 'Number' },
+    { sql: 'street', label: 'Street' },
+    { sql: 'postcode', label: 'Postcode' },
+    { sql: 'country', label: 'Country' },
+  ],
+  'transportation/segment': [
+    { sql: 'subtype', label: 'Subtype' },
+    { sql: 'class', label: 'Class' },
+    { sql: 'subclass', label: 'Subclass' },
+  ],
+  'base/infrastructure': [
+    { sql: 'subtype', label: 'Subtype' },
+    { sql: 'class', label: 'Class' },
+  ],
+  'base/land': [
+    { sql: 'subtype', label: 'Subtype' },
+    { sql: 'class', label: 'Class' },
+    { sql: 'elevation', label: 'Elevation' },
+  ],
+  'base/land_cover': [
+    { sql: 'subtype', label: 'Subtype' },
+  ],
+  'base/land_use': [
+    { sql: 'subtype', label: 'Subtype' },
+    { sql: 'class', label: 'Class' },
+  ],
+  'base/water': [
+    { sql: 'subtype', label: 'Subtype' },
+    { sql: 'class', label: 'Class' },
+    { sql: 'is_salt', label: 'Salt' },
+    { sql: 'is_intermittent', label: 'Intermittent' },
+  ],
+  'base/bathymetry': [
+    { sql: 'depth', label: 'Depth' },
+  ],
+  'divisions/division': [
+    { sql: 'subtype', label: 'Subtype' },
+    { sql: 'country', label: 'Country' },
+    { sql: 'population', label: 'Population' },
+    { sql: 'sources[1].record_id', label: 'OSM record' },
+    { sql: "regexp_replace(sources[1].record_id, '@.*', '')", label: 'OSM relation id' },
+  ],
+  'divisions/division_area': [
+    { sql: 'subtype', label: 'Subtype' },
+    { sql: 'country', label: 'Country' },
+    { sql: 'sources[1].record_id', label: 'OSM record' },
+    { sql: "regexp_replace(sources[1].record_id, '@.*', '')", label: 'OSM relation id' },
+  ],
+  'divisions/division_boundary': [
+    { sql: 'subtype', label: 'Subtype' },
+    { sql: 'class', label: 'Class' },
+  ],
+};
+
+const TILE_HAS_NAMES = new Set([
+  'places/place', 'buildings/building', 'buildings/building_part',
+  'transportation/segment', 'base/infrastructure', 'base/land',
+  'base/land_use', 'base/water', 'divisions/division',
+  'divisions/division_area',
+]);
+
+function buildTileColumns(themeKey) {
+  const defs = TILE_THEME_FIELDS[themeKey] || [];
+  const displayNameCol = TILE_HAS_NAMES.has(themeKey)
+    ? "COALESCE(CAST(names.primary AS VARCHAR), '') as display_name"
+    : "'' as display_name";
+
+  return [
+    'id',
+    displayNameCol,
+    'hex(geometry) as geometry_wkb',
+    'bbox.xmin as bbox_xmin',
+    'bbox.xmax as bbox_xmax',
+    'bbox.ymin as bbox_ymin',
+    'bbox.ymax as bbox_ymax',
+    '(bbox.xmin + bbox.xmax) / 2 as centroid_lon',
+    '(bbox.ymin + bbox.ymax) / 2 as centroid_lat',
+    ...defs.map((f, i) => `CAST(${f.sql} AS VARCHAR) as _f${i}`),
+  ];
+}
+
+// ── GET /tiles/{theme}/{type}/{resolution}/{lat}/{lon}.arrow ─────────────────
+
+const VALID_RESOLUTIONS = new Set(['0.01', '0.1', '1']);
+
+async function handleTile(ctx, url, match, ttl) {
+  const release = url.searchParams.get('release');
+  if (!release) return json({ error: 'Missing ?release' }, { status: 400 });
+
+  const themeKey = match[1]; // e.g. "places/place"
+  const resStr = match[2];
+  const lat = parseFloat(match[3]);
+  const lon = parseFloat(match[4]);
+
+  if (!VALID_RESOLUTIONS.has(resStr)) {
+    return json({ error: `Invalid resolution: ${resStr}. Must be 0.01, 0.1, or 1` }, { status: 400 });
+  }
+  if (isNaN(lat) || isNaN(lon)) {
+    return json({ error: 'Invalid lat/lon' }, { status: 400 });
+  }
+
+  const resolution = parseFloat(resStr);
+  const [theme, type] = themeKey.split('/');
+
+  // Compute cell bbox
+  const bbox = {
+    ymin: lat,
+    xmin: lon,
+    ymax: Math.round((lat + resolution) * 1e6) / 1e6,
+    xmax: Math.round((lon + resolution) * 1e6) / 1e6,
+  };
+
+  const { files } = await getFilteredFiles(ctx, release, theme, type, bbox, ttl);
+
+  if (files.length === 0) {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        'Cache-Control': 'public, max-age=2592000',
+        ...corsHeaders,
+      },
+    });
+  }
+
+  const columns = buildTileColumns(themeKey);
+  const where = `bbox.xmax >= ${bbox.xmin} AND bbox.xmin <= ${bbox.xmax} AND bbox.ymax >= ${bbox.ymin} AND bbox.ymin <= ${bbox.ymax}`;
+  const limit = 10000;
+
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+
+  let perFileMax = 5000;
+
+  const streamWork = withLock(async () => {
+    let totalRows = 0;
+    for (let i = 0; i < files.length && totalRows < limit; i++) {
+      const remaining = Math.min(limit - totalRows, perFileMax);
+      try {
+        const table = await runQueryArrow(files[i], columns, where, remaining);
+        const ipcBytes = new Uint8Array(tableToIPC(table, { format: 'stream' }));
+        totalRows += table.numRows;
+
+        const lenBuf = new ArrayBuffer(4);
+        new DataView(lenBuf).setUint32(0, ipcBytes.byteLength, true);
+        await writer.write(new Uint8Array(lenBuf));
+        await writer.write(ipcBytes);
+
+        if (perFileMax < 10000) perFileMax = Math.min(perFileMax * 2, 10000);
+      } catch (e) {
+        resetDb();
+
+        if (e.message?.includes('Out of Memory') && remaining > 500) {
+          perFileMax = Math.max(500, Math.floor(remaining / 2));
+          i--;
+          continue;
+        }
+
+        const errJson = new TextEncoder().encode(JSON.stringify({ error: e.message, file: i }));
+        const errHeader = new ArrayBuffer(8);
+        const errView = new DataView(errHeader);
+        errView.setUint32(0, 0, true);
+        errView.setUint32(4, errJson.byteLength, true);
+        await writer.write(new Uint8Array(errHeader));
+        await writer.write(errJson);
+      }
+      resetDb();
+    }
+  });
+
+  streamWork.finally(() => writer.close());
+
+  return new Response(readable, {
+    headers: {
+      'Content-Type': 'application/vnd.apache.arrow.stream',
+      'Cache-Control': 'public, max-age=2592000',
+      ...corsHeaders,
     },
   });
 }
