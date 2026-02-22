@@ -12,23 +12,6 @@ const HAS_NAMES = new Set([
   'divisions/division_area',
 ]);
 
-export function splitBbox(bbox, cols = 2, rows = 2) {
-  const dx = (bbox.xmax - bbox.xmin) / cols;
-  const dy = (bbox.ymax - bbox.ymin) / rows;
-  const tiles = [];
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      tiles.push({
-        xmin: bbox.xmin + c * dx,
-        xmax: bbox.xmin + (c + 1) * dx,
-        ymin: bbox.ymin + r * dy,
-        ymax: bbox.ymin + (r + 1) * dy,
-      });
-    }
-  }
-  return tiles;
-}
-
 export function buildQueryParams(key, files, bbox, limit) {
   const defs = THEME_FIELDS[key] || [];
   const extraFields = defs;
