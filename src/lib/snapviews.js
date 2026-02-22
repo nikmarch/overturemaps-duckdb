@@ -5,6 +5,7 @@ import { getThemeColor } from './themes.js';
 
 const SNAPVIEWS_KEY_PREFIX = `overture_snapviews_${location.origin}`;
 let snapviewsLayer = null;
+let maskLayer = null;
 let showSnapviews = true;
 let currentRelease = null;
 
@@ -20,6 +21,12 @@ export function initSnapviewsLayer() {
   useStore.subscribe(
     s => s.snapviews,
     list => syncMapOverlays(list),
+  );
+
+  // Subscribe to activeSnapview changes to sync the spotlight mask
+  useStore.subscribe(
+    s => s.activeSnapview,
+    () => syncMask(),
   );
 
   // On zoom/pan, update tooltip visibility (hide when rect fits in viewport)
@@ -154,7 +161,7 @@ function getStatusStyle(sv) {
         color: color.stroke,
         weight: 1.3,
         fillColor: color.fill,
-        fillOpacity: 0.03,
+        fillOpacity: 0,
         dashArray: null,
         interactive: true,
       };
@@ -230,6 +237,37 @@ function updateTooltipVisibility() {
   }
 }
 
+function syncMask() {
+  const map = getMap();
+  if (!map) return;
+
+  const activeId = useStore.getState().activeSnapview;
+  const snapviews = useStore.getState().snapviews;
+  const activeSv = activeId && snapviews.find(sv => sv.id === activeId && sv.status === 'done');
+
+  if (activeSv) {
+    const { xmin, ymin, xmax, ymax } = activeSv.bbox;
+    // Outer ring (world), inner hole (bbox) — reversed winding cuts the hole
+    const outer = [[-90, -180], [-90, 180], [90, 180], [90, -180]];
+    const hole = [[ymin, xmin], [ymax, xmin], [ymax, xmax], [ymin, xmax]];
+
+    if (maskLayer) {
+      maskLayer.setLatLngs([outer, hole]);
+    } else {
+      maskLayer = L.polygon([outer, hole], {
+        fillColor: '#000',
+        fillOpacity: 0.15,
+        stroke: false,
+        interactive: false,
+      });
+      maskLayer.addTo(map);
+    }
+  } else if (maskLayer) {
+    maskLayer.remove();
+    maskLayer = null;
+  }
+}
+
 function syncMapOverlays(list) {
   if (!snapviewsLayer || !showSnapviews) return;
 
@@ -295,4 +333,7 @@ function syncMapOverlays(list) {
 
   // Update visibility after syncing
   updateTooltipVisibility();
+
+  // Sync the spotlight mask (active snapview may have changed)
+  syncMask();
 }

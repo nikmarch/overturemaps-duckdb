@@ -600,6 +600,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   font-size: 10px;
   font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
 }
+.snapview-theme-controls {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
 .snapview-cap-row {
   display: flex;
   align-items: center;

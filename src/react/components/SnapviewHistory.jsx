@@ -201,6 +201,16 @@ export default function SnapviewHistory() {
                       );
                     })}
                   </div>
+                  <div className="snapview-theme-controls">
+                    <button className="snapview-action-btn" onClick={(e) => {
+                      e.stopPropagation();
+                      sv.keys.forEach(k => toggleSnapviewTheme(sv.id, k, true));
+                    }}>Select all</button>
+                    <button className="snapview-action-btn" onClick={(e) => {
+                      e.stopPropagation();
+                      sv.keys.forEach(k => toggleSnapviewTheme(sv.id, k, false));
+                    }}>Clear all</button>
+                  </div>
                   <div className="snapview-cap-row" onClick={(e) => e.stopPropagation()}>
                     <span className="snapview-cap-label">Cap</span>
                     <input
