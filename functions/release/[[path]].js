@@ -1,5 +1,5 @@
 // Proxy /release/* to the worker (S3 parquet files)
-const WORKER_URL = 'https://overture-s3-proxy.nik-d71.workers.dev';
+const WORKER_URL = 'https://overture-s3-proxy.zarbazan.workers.dev';
 
 export async function onRequest(context) {
   const url = new URL(context.request.url);
