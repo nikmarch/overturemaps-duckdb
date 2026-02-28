@@ -36,14 +36,23 @@ jobs:
         run: npx vite build
         working-directory: worker
 
+      - name: Set worker name
+        id: worker-name
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "name=overture-s3-proxy-preview" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=overture-s3-proxy" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Deploy Worker
-        run: npx wrangler deploy --config dist/overture_s3_proxy/wrangler.json
+        run: npx wrangler deploy --config dist/overture_s3_proxy/wrangler.json --name ${{ steps.worker-name.outputs.name }}
         working-directory: worker
 
       - name: Build frontend
         run: npm install && npm run build
         env:
-          VITE_API_URL: https://overture-s3-proxy.zarbazan.workers.dev
+          VITE_API_URL: https://${{ steps.worker-name.outputs.name }}.${{ env.CLOUDFLARE_SUBDOMAIN }}.workers.dev
 
       - name: Create Pages project if needed
         run: npx wrangler pages project create overture-maps --production-branch=master 2>/dev/null || true
@@ -63,8 +72,9 @@ jobs:
           script: |
             const branch = '${{ github.head_ref }}'.replace(/\//g, '-');
             const previewUrl = `https://${branch}.overture-maps.pages.dev`;
+            const workerUrl = `https://${{ steps.worker-name.outputs.name }}.${{ env.CLOUDFLARE_SUBDOMAIN }}.workers.dev`;
             const marker = '<!-- preview-comment -->';
-            const body = `${marker}\n🚀 Preview deployed to: ${previewUrl}`;
+            const body = `${marker}\n🚀 Preview deployed to: ${previewUrl}\n🔧 Worker: ${workerUrl}`;
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
@@ -75,7 +85,12 @@ jobs:
             const existing = comments.find(c => c.body.includes(marker));
 
             if (existing) {
-              console.log('Preview comment already exists, skipping');
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body
+              });
             } else {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,

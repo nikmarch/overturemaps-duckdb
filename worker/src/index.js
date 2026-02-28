@@ -587,11 +587,8 @@ async function handleTile(ctx, url, match, request, env, ttl) {
   const where = `bbox.xmax >= ${bbox.xmin} AND bbox.xmin <= ${bbox.xmax} AND bbox.ymax >= ${bbox.ymin} AND bbox.ymin <= ${bbox.ymax}`;
   const limit = 50000;
 
-  // Try fan-out (production: parallel isolates), fall back to local DuckDB (wrangler dev)
-  let frames = await tileQueryFanOut(files, columns, where, limit, request);
-  if (frames === null) {
-    frames = await tileQueryLocal(files, columns, where, limit);
-  }
+  // Query DuckDB directly — self-fetch to *.workers.dev returns 404 inside CF Workers
+  const frames = await tileQueryLocal(files, columns, where, limit);
 
   if (frames.length === 0) {
     return new Response(null, {
@@ -621,40 +618,7 @@ async function handleTile(ctx, url, match, request, env, ttl) {
   });
 }
 
-// Production: fan out to /query/exec — each subrequest gets its own isolate.
-// Returns null if self-fetch fails (local wrangler dev), triggering local fallback.
-async function tileQueryFanOut(files, columns, where, limit, request) {
-  const origin = new URL(request.url).origin;
-  const CONCURRENCY = 6;
-  const frames = [];
-
-  for (let i = 0; i < files.length; i += CONCURRENCY) {
-    const batch = files.slice(i, i + CONCURRENCY);
-    const results = await Promise.allSettled(batch.map(async file => {
-      const res = await fetch(`${origin}/query/exec`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file, columns, where, limit }),
-      });
-      if (!res.ok) return null;
-      const rows = parseInt(res.headers.get('X-Row-Count') || '0');
-      if (rows === 0) return null;
-      return new Uint8Array(await res.arrayBuffer());
-    }));
-
-    // If any fetch rejected (network error), we're in local dev — bail out
-    if (results.some(r => r.status === 'rejected')) return null;
-
-    for (const r of results) {
-      if (r.status === 'fulfilled' && r.value && r.value.byteLength > 0) {
-        frames.push(r.value);
-      }
-    }
-  }
-  return frames;
-}
-
-// Local dev: query DuckDB directly (wrangler can't self-fetch)
+// Query DuckDB directly for tile data
 async function tileQueryLocal(files, columns, where, limit) {
   const frames = [];
   let totalRows = 0;
