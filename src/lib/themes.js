@@ -1,7 +1,7 @@
 import L from 'leaflet';
 import { PROXY, PALETTE_16, THEME_COLORS, DEFAULT_COLOR } from './constants.js';
-import { query } from './duckdb.js';
-import { getMap, getBbox, bboxContains } from './map.js';
+import { query, queryTile } from './duckdb.js';
+import { getMap, getBbox, getZoom, bboxContains } from './map.js';
 import { buildQueryParams } from './query.js';
 import { renderFeature } from './render.js';
 import { darkenHex } from './render.js';
@@ -204,63 +204,77 @@ export async function loadTheme(key, snapviewId) {
     if (!useCache) {
       log(`Loading ${type}...`);
 
-      const filesUrl = `${PROXY}/files?release=${currentRelease}&theme=${theme}&type=${type}&xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
-      const filesRes = await fetch(filesUrl, { signal: ac.signal });
-      const fileKeys = await filesRes.json();
-      const total = filesRes.headers.get('X-Total-Files') || '?';
-      const filtered = filesRes.headers.get('X-Filtered-Files') || '?';
-      fileCount = fileKeys.length;
+      // 1. Get geohash tile list from worker
+      const zoom = getZoom();
+      const tilesUrl = `${PROXY}/tiles/${key}?release=${currentRelease}&xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}&zoom=${zoom}`;
+      const tilesRes = await fetch(tilesUrl, { signal: ac.signal });
+      const hashes = await tilesRes.json();
+      fileCount = hashes.length;
 
-      const metaText = `${filtered}/${total}`;
+      const metaText = `${hashes.length} tiles`;
       useStore.setState(s => ({
         themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), metaText } },
       }));
 
       if (snapviewId) {
-        updateSnapviewTheme(snapviewId, key, { status: 'loading', filesLoaded: 0, filesTotal: fileKeys.length });
+        updateSnapviewTheme(snapviewId, key, { status: 'loading', filesLoaded: 0, filesTotal: hashes.length });
       }
 
-      if (fileKeys.length > 0) {
+      if (hashes.length > 0) {
         const renderLimit = getRenderLimit(svCap);
-        const { params, extraFields } = buildQueryParams(key, fileKeys, bbox, limit);
-        state.extraFields = extraFields;
+        // extraFields from THEME_FIELDS (same columns the worker uses)
+        const defs = (await import('./constants.js')).THEME_FIELDS[key] || [];
+        state.extraFields = defs;
         state.cachedRows = [];
         let rendered = 0;
 
-        await query(params, (batchRows, fileIndex, totalFiles) => {
-          for (const row of batchRows) {
-            if (row.geometry_wkb) {
-              const parsed = parseWkb(row.geometry_wkb);
-              if (parsed) {
-                row.geom_type = parsed.geom_type;
-                row.geojson = JSON.stringify(parsed.geojson);
+        // 2. Fetch each geohash tile individually (CDN-cached)
+        const CONCURRENCY = 6;
+        for (let i = 0; i < hashes.length; i += CONCURRENCY) {
+          if (ac.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+          const batch = hashes.slice(i, i + CONCURRENCY);
+          const results = await Promise.all(batch.map(hash => {
+            const tileUrl = `${PROXY}/tiles/${key}/${hash}.arrow?release=${currentRelease}`;
+            return queryTile(tileUrl, { signal: ac.signal });
+          }));
+
+          for (const { rows: batchRows } of results) {
+            if (batchRows.length === 0) continue;
+
+            for (const row of batchRows) {
+              if (row.geometry_wkb) {
+                const parsed = parseWkb(row.geometry_wkb);
+                if (parsed) {
+                  row.geom_type = parsed.geom_type;
+                  row.geojson = JSON.stringify(parsed.geojson);
+                }
+              }
+              if (row.centroid_lon == null && row.bbox_xmin != null) {
+                row.centroid_lon = (row.bbox_xmin + row.bbox_xmax) / 2;
+                row.centroid_lat = (row.bbox_ymin + row.bbox_ymax) / 2;
               }
             }
-            if (row.centroid_lon == null && row.bbox_xmin != null) {
-              row.centroid_lon = (row.bbox_xmin + row.bbox_xmax) / 2;
-              row.centroid_lat = (row.bbox_ymin + row.bbox_ymax) / 2;
+            state.cachedRows.push(...batchRows);
+
+            const canRender = Math.max(0, renderLimit - rendered);
+            const toRender = batchRows.slice(0, canRender);
+            for (const row of toRender) {
+              renderFeature(row, state, color, defs);
             }
+            rendered += toRender.length;
           }
-          state.cachedRows.push(...batchRows);
 
-          const canRender = Math.max(0, renderLimit - rendered);
-          const toRender = batchRows.slice(0, canRender);
-          for (const row of toRender) {
-            renderFeature(row, state, color, extraFields);
-          }
-          rendered += toRender.length;
-
-          log(`${type}: ${fileIndex + 1}/${totalFiles} files, ${state.cachedRows.length} rows`);
+          log(`${type}: ${Math.min(i + CONCURRENCY, hashes.length)}/${hashes.length} tiles, ${state.cachedRows.length} rows`);
           updateStats();
 
           if (snapviewId) {
             updateSnapviewTheme(snapviewId, key, {
               status: 'loading',
-              filesLoaded: fileIndex + 1,
-              filesTotal: totalFiles,
+              filesLoaded: Math.min(i + CONCURRENCY, hashes.length),
+              filesTotal: hashes.length,
             });
           }
-        }, { signal: ac.signal });
+        }
       }
 
       state.bbox = { ...bbox };

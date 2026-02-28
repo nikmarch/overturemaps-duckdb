@@ -1,4 +1,4 @@
-export const PROXY = '/api';
+export const PROXY = import.meta.env.VITE_API_URL || '/api';
 
 export const DEFAULT_VIEW = [34.05, -118.25];
 export const DEFAULT_ZOOM = 14;

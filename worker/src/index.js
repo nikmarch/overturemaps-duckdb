@@ -4,6 +4,73 @@ import wasmModule from '@ducklings/workers/wasm';
 
 const S3_BASE = 'https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com';
 
+// ── Inline geohash decode (duplicated from src/lib/grid.js) ──────────────────
+
+const BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+
+function geohashEncode(lat, lon, precision = 6) {
+  let minLat = -90, maxLat = 90, minLon = -180, maxLon = 180;
+  let hash = '';
+  let isLon = true;
+  let bit = 0;
+  let ch = 0;
+  while (hash.length < precision) {
+    if (isLon) {
+      const mid = (minLon + maxLon) / 2;
+      if (lon >= mid) { ch = (ch << 1) | 1; minLon = mid; }
+      else            { ch = ch << 1;       maxLon = mid; }
+    } else {
+      const mid = (minLat + maxLat) / 2;
+      if (lat >= mid) { ch = (ch << 1) | 1; minLat = mid; }
+      else            { ch = ch << 1;       maxLat = mid; }
+    }
+    isLon = !isLon;
+    if (++bit === 5) { hash += BASE32[ch]; ch = 0; bit = 0; }
+  }
+  return hash;
+}
+
+function geohashDecodeBbox(hash) {
+  let minLat = -90, maxLat = 90, minLon = -180, maxLon = 180;
+  let isLon = true;
+  for (const c of hash) {
+    const val = BASE32.indexOf(c);
+    for (let bit = 4; bit >= 0; bit--) {
+      if (isLon) {
+        const mid = (minLon + maxLon) / 2;
+        if (val & (1 << bit)) minLon = mid; else maxLon = mid;
+      } else {
+        const mid = (minLat + maxLat) / 2;
+        if (val & (1 << bit)) minLat = mid; else maxLat = mid;
+      }
+      isLon = !isLon;
+    }
+  }
+  return { ymin: minLat, xmin: minLon, ymax: maxLat, xmax: maxLon };
+}
+
+function geohashesForBbox(bbox, precision) {
+  const hashes = new Set();
+  const sample = geohashDecodeBbox(geohashEncode(bbox.ymin, bbox.xmin, precision));
+  const stepLat = sample.ymax - sample.ymin;
+  const stepLon = sample.xmax - sample.xmin;
+  const latStart = Math.floor(bbox.ymin / stepLat) * stepLat;
+  const lonStart = Math.floor(bbox.xmin / stepLon) * stepLon;
+  for (let lat = latStart; lat < bbox.ymax; lat += stepLat) {
+    for (let lon = lonStart; lon < bbox.xmax; lon += stepLon) {
+      hashes.add(geohashEncode(lat + stepLat / 2, lon + stepLon / 2, precision));
+    }
+  }
+  return [...hashes];
+}
+
+function precisionForZoom(zoom) {
+  if (zoom >= 16) return 6;
+  if (zoom >= 12) return 5;
+  if (zoom >= 8) return 4;
+  return 3;
+}
+
 // Cache TTLs: production = 1 day, dev/preview = 1 minute
 function cacheTtl(env) {
   return env.ENVIRONMENT === 'production' ? 86400 : 60;
@@ -59,6 +126,11 @@ export default {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
+    // Strip /api/ prefix (nginx dev proxy and direct access both work)
+    if (url.pathname.startsWith('/api/')) {
+      url.pathname = url.pathname.slice(4);
+    }
+
     const ttl = cacheTtl(env);
 
     if (url.pathname === '/releases') return handleReleases(ctx, ttl);
@@ -67,12 +139,18 @@ export default {
     if (url.pathname === '/query/exec' && request.method === 'POST') return handleQueryExec(request);
     if (url.pathname === '/query' && request.method === 'POST') return handleQuery(request);
 
-    // Tile endpoint: deterministic grid cells for CDN caching
+    // Tile list: returns geohashes covering the viewport
+    const tileListMatch = url.pathname.match(/^\/tiles\/([^/]+\/[^/]+)$/);
+    if (tileListMatch && request.method === 'GET') {
+      return handleTileList(url, tileListMatch);
+    }
+
+    // Tile data: geohash-based cells for CDN caching
     const tilesMatch = url.pathname.match(
-      /^\/tiles\/([^/]+\/[^/]+)\/([\d.]+)\/(-?[\d.]+)\/(-?[\d.]+)\.arrow$/
+      /^\/tiles\/([^/]+\/[^/]+)\/([0-9b-hjkmnp-z]{1,12})\.arrow$/
     );
     if (tilesMatch && request.method === 'GET') {
-      return handleTile(ctx, url, tilesMatch, ttl);
+      return handleTile(ctx, url, tilesMatch, request, env, ttl);
     }
 
     // S3 proxy: passthrough for /release/... parquet files and listing XML
@@ -460,103 +538,165 @@ function buildTileColumns(themeKey) {
   ];
 }
 
-// ── GET /tiles/{theme}/{type}/{resolution}/{lat}/{lon}.arrow ─────────────────
+// ── GET /tiles/{theme}/{type}?release&xmin&ymin&xmax&ymax&zoom ──────────────
 
-const VALID_RESOLUTIONS = new Set(['0.01', '0.1', '1']);
+async function handleTileList(url, match) {
+  const release = url.searchParams.get('release');
+  if (!release) return json({ error: 'Missing ?release' }, { status: 400 });
 
-async function handleTile(ctx, url, match, ttl) {
+  const xmin = parseFloat(url.searchParams.get('xmin'));
+  const ymin = parseFloat(url.searchParams.get('ymin'));
+  const xmax = parseFloat(url.searchParams.get('xmax'));
+  const ymax = parseFloat(url.searchParams.get('ymax'));
+  const zoom = parseInt(url.searchParams.get('zoom'));
+
+  if ([xmin, ymin, xmax, ymax, zoom].some(isNaN)) {
+    return json({ error: 'Missing bbox/zoom params' }, { status: 400 });
+  }
+
+  const precision = precisionForZoom(zoom);
+  const hashes = geohashesForBbox({ xmin, ymin, xmax, ymax }, precision);
+
+  return json(hashes, {
+    headers: { 'Cache-Control': 'no-store' },
+  });
+}
+
+// ── GET /tiles/{theme}/{type}/{geohash}.arrow ────────────────────────────────
+
+async function handleTile(ctx, url, match, request, env, ttl) {
   const release = url.searchParams.get('release');
   if (!release) return json({ error: 'Missing ?release' }, { status: 400 });
 
   const themeKey = match[1]; // e.g. "places/place"
-  const resStr = match[2];
-  const lat = parseFloat(match[3]);
-  const lon = parseFloat(match[4]);
-
-  if (!VALID_RESOLUTIONS.has(resStr)) {
-    return json({ error: `Invalid resolution: ${resStr}. Must be 0.01, 0.1, or 1` }, { status: 400 });
-  }
-  if (isNaN(lat) || isNaN(lon)) {
-    return json({ error: 'Invalid lat/lon' }, { status: 400 });
-  }
-
-  const resolution = parseFloat(resStr);
+  const geohash = match[2];
   const [theme, type] = themeKey.split('/');
+  const bbox = geohashDecodeBbox(geohash);
 
-  // Compute cell bbox
-  const bbox = {
-    ymin: lat,
-    xmin: lon,
-    ymax: Math.round((lat + resolution) * 1e6) / 1e6,
-    xmax: Math.round((lon + resolution) * 1e6) / 1e6,
-  };
-
-  const { files } = await getFilteredFiles(ctx, release, theme, type, bbox, ttl);
+  // Use cached bbox index to find overlapping files, fall back to full list
+  const files = await getTileFiles(release, theme, type, bbox);
 
   if (files.length === 0) {
     return new Response(null, {
       status: 204,
-      headers: {
-        'Cache-Control': 'public, max-age=2592000',
-        ...corsHeaders,
-      },
+      headers: { 'Cache-Control': 'public, max-age=2592000', ...corsHeaders },
     });
   }
 
   const columns = buildTileColumns(themeKey);
   const where = `bbox.xmax >= ${bbox.xmin} AND bbox.xmin <= ${bbox.xmax} AND bbox.ymax >= ${bbox.ymin} AND bbox.ymin <= ${bbox.ymax}`;
-  const limit = 10000;
+  const limit = 50000;
 
-  const { readable, writable } = new TransformStream();
-  const writer = writable.getWriter();
+  // Try fan-out (production: parallel isolates), fall back to local DuckDB (wrangler dev)
+  let frames = await tileQueryFanOut(files, columns, where, limit, request);
+  if (frames === null) {
+    frames = await tileQueryLocal(files, columns, where, limit);
+  }
 
-  let perFileMax = 5000;
+  if (frames.length === 0) {
+    return new Response(null, {
+      status: 204,
+      headers: { 'Cache-Control': 'public, max-age=2592000', ...corsHeaders },
+    });
+  }
 
-  const streamWork = withLock(async () => {
-    let totalRows = 0;
-    for (let i = 0; i < files.length && totalRows < limit; i++) {
-      const remaining = Math.min(limit - totalRows, perFileMax);
-      try {
-        const table = await runQueryArrow(files[i], columns, where, remaining);
-        const ipcBytes = new Uint8Array(tableToIPC(table, { format: 'stream' }));
-        totalRows += table.numRows;
+  // Assemble framed response: [4-byte LE length][Arrow IPC bytes] per frame
+  let totalLen = 0;
+  for (const f of frames) totalLen += 4 + f.byteLength;
+  const out = new Uint8Array(totalLen);
+  const view = new DataView(out.buffer);
+  let offset = 0;
+  for (const f of frames) {
+    view.setUint32(offset, f.byteLength, true);
+    out.set(f, offset + 4);
+    offset += 4 + f.byteLength;
+  }
 
-        const lenBuf = new ArrayBuffer(4);
-        new DataView(lenBuf).setUint32(0, ipcBytes.byteLength, true);
-        await writer.write(new Uint8Array(lenBuf));
-        await writer.write(ipcBytes);
-
-        if (perFileMax < 10000) perFileMax = Math.min(perFileMax * 2, 10000);
-      } catch (e) {
-        resetDb();
-
-        if (e.message?.includes('Out of Memory') && remaining > 500) {
-          perFileMax = Math.max(500, Math.floor(remaining / 2));
-          i--;
-          continue;
-        }
-
-        const errJson = new TextEncoder().encode(JSON.stringify({ error: e.message, file: i }));
-        const errHeader = new ArrayBuffer(8);
-        const errView = new DataView(errHeader);
-        errView.setUint32(0, 0, true);
-        errView.setUint32(4, errJson.byteLength, true);
-        await writer.write(new Uint8Array(errHeader));
-        await writer.write(errJson);
-      }
-      resetDb();
-    }
-  });
-
-  streamWork.finally(() => writer.close());
-
-  return new Response(readable, {
+  return new Response(out, {
     headers: {
       'Content-Type': 'application/vnd.apache.arrow.stream',
       'Cache-Control': 'public, max-age=2592000',
       ...corsHeaders,
     },
   });
+}
+
+// Production: fan out to /query/exec — each subrequest gets its own isolate.
+// Returns null if self-fetch fails (local wrangler dev), triggering local fallback.
+async function tileQueryFanOut(files, columns, where, limit, request) {
+  const origin = new URL(request.url).origin;
+  const CONCURRENCY = 6;
+  const frames = [];
+
+  for (let i = 0; i < files.length; i += CONCURRENCY) {
+    const batch = files.slice(i, i + CONCURRENCY);
+    const results = await Promise.allSettled(batch.map(async file => {
+      const res = await fetch(`${origin}/query/exec`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file, columns, where, limit }),
+      });
+      if (!res.ok) return null;
+      const rows = parseInt(res.headers.get('X-Row-Count') || '0');
+      if (rows === 0) return null;
+      return new Uint8Array(await res.arrayBuffer());
+    }));
+
+    // If any fetch rejected (network error), we're in local dev — bail out
+    if (results.some(r => r.status === 'rejected')) return null;
+
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value && r.value.byteLength > 0) {
+        frames.push(r.value);
+      }
+    }
+  }
+  return frames;
+}
+
+// Local dev: query DuckDB directly (wrangler can't self-fetch)
+async function tileQueryLocal(files, columns, where, limit) {
+  const frames = [];
+  let totalRows = 0;
+  let perFileMax = 5000;
+
+  await withLock(async () => {
+    for (let i = 0; i < files.length && totalRows < limit; i++) {
+      const remaining = Math.min(limit - totalRows, perFileMax);
+      try {
+        const table = await runQueryArrow(files[i], columns, where, remaining);
+        if (table.numRows > 0) {
+          frames.push(new Uint8Array(tableToIPC(table, { format: 'stream' })));
+          totalRows += table.numRows;
+        }
+        if (perFileMax < 10000) perFileMax = Math.min(perFileMax * 2, 10000);
+      } catch (e) {
+        resetDb();
+        if (e.message?.includes('Out of Memory') && remaining > 500) {
+          perFileMax = Math.max(500, Math.floor(remaining / 2));
+          i--;
+          continue;
+        }
+      }
+      resetDb();
+    }
+  });
+  return frames;
+}
+
+async function getTileFiles(release, theme, type, bbox) {
+  const cache = caches.default;
+  const indexKey = cacheKey('index', [release, theme, type]);
+  const hit = await cachedJson(cache, indexKey);
+  if (hit) {
+    return Object.keys(hit.data).filter(f => {
+      const b = hit.data[f];
+      return b.xmax >= bbox.xmin && b.xmin <= bbox.xmax && b.ymax >= bbox.ymin && b.ymin <= bbox.ymax;
+    });
+  }
+
+  // No index yet — return all files, DuckDB WHERE clause filters at query time
+  return listS3Files({ release, theme, type });
 }
 
 async function buildBboxIndex(files) {

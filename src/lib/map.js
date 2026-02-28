@@ -25,6 +25,10 @@ export function getMap() {
   return map;
 }
 
+export function getZoom() {
+  return map.getZoom();
+}
+
 export function getBbox() {
   const b = map.getBounds();
   return { xmin: b.getWest(), xmax: b.getEast(), ymin: b.getSouth(), ymax: b.getNorth() };

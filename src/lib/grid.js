@@ -1,38 +1,76 @@
 /**
- * Deterministic spatial grid math for CDN-cacheable tile requests.
- * All arithmetic uses * 1e6 / 1e6 rounding to avoid floating-point drift.
+ * Geohash utilities for CDN-cacheable tile requests.
  */
 
-export function resolutionForZoom(zoom) {
-  if (zoom >= 14) return 0.01;
-  if (zoom >= 10) return 0.1;
-  return 1.0;
+const BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+
+export function geohashEncode(lat, lon, precision = 6) {
+  let minLat = -90, maxLat = 90, minLon = -180, maxLon = 180;
+  let hash = '';
+  let isLon = true;
+  let bit = 0;
+  let ch = 0;
+
+  while (hash.length < precision) {
+    if (isLon) {
+      const mid = (minLon + maxLon) / 2;
+      if (lon >= mid) { ch = (ch << 1) | 1; minLon = mid; }
+      else            { ch = ch << 1;       maxLon = mid; }
+    } else {
+      const mid = (minLat + maxLat) / 2;
+      if (lat >= mid) { ch = (ch << 1) | 1; minLat = mid; }
+      else            { ch = ch << 1;       maxLat = mid; }
+    }
+    isLon = !isLon;
+    if (++bit === 5) { hash += BASE32[ch]; ch = 0; bit = 0; }
+  }
+  return hash;
 }
 
-export function cellOrigin(coord, res) {
-  return Math.round(Math.floor(coord / res) * res * 1e6) / 1e6;
-}
+export function geohashDecodeBbox(hash) {
+  let minLat = -90, maxLat = 90, minLon = -180, maxLon = 180;
+  let isLon = true;
 
-export function cellBbox(lat, lon, res) {
-  return {
-    ymin: lat,
-    xmin: lon,
-    ymax: Math.round((lat + res) * 1e6) / 1e6,
-    xmax: Math.round((lon + res) * 1e6) / 1e6,
-  };
-}
-
-export function viewportCells(bbox, resolution) {
-  const cells = [];
-  const latStart = cellOrigin(bbox.ymin, resolution);
-  const lonStart = cellOrigin(bbox.xmin, resolution);
-  const latEnd = bbox.ymax;
-  const lonEnd = bbox.xmax;
-
-  for (let lat = latStart; lat < latEnd; lat = Math.round((lat + resolution) * 1e6) / 1e6) {
-    for (let lon = lonStart; lon < lonEnd; lon = Math.round((lon + resolution) * 1e6) / 1e6) {
-      cells.push({ lat, lon });
+  for (const c of hash) {
+    const val = BASE32.indexOf(c);
+    for (let bit = 4; bit >= 0; bit--) {
+      if (isLon) {
+        const mid = (minLon + maxLon) / 2;
+        if (val & (1 << bit)) minLon = mid; else maxLon = mid;
+      } else {
+        const mid = (minLat + maxLat) / 2;
+        if (val & (1 << bit)) minLat = mid; else maxLat = mid;
+      }
+      isLon = !isLon;
     }
   }
-  return cells;
+  return { ymin: minLat, xmin: minLon, ymax: maxLat, xmax: maxLon };
+}
+
+export function geohashesForBbox(bbox, precision) {
+  const hashes = new Set();
+  // Get cell dimensions from a sample point
+  const sample = geohashDecodeBbox(geohashEncode(bbox.ymin, bbox.xmin, precision));
+  const stepLat = sample.ymax - sample.ymin;
+  const stepLon = sample.xmax - sample.xmin;
+
+  // Snap start to cell boundary before bbox, iterate past bbox end
+  // to catch all cells that intersect the viewport
+  const latStart = Math.floor(bbox.ymin / stepLat) * stepLat;
+  const lonStart = Math.floor(bbox.xmin / stepLon) * stepLon;
+
+  for (let lat = latStart; lat < bbox.ymax; lat += stepLat) {
+    for (let lon = lonStart; lon < bbox.xmax; lon += stepLon) {
+      // Use cell center to encode — avoids boundary ambiguity
+      hashes.add(geohashEncode(lat + stepLat / 2, lon + stepLon / 2, precision));
+    }
+  }
+  return [...hashes];
+}
+
+export function precisionForZoom(zoom) {
+  if (zoom >= 16) return 6;
+  if (zoom >= 12) return 5;
+  if (zoom >= 8) return 4;
+  return 3;
 }
