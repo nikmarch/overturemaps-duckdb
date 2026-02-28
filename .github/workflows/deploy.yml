@@ -42,9 +42,8 @@ jobs:
 
       - name: Build frontend
         run: npm install && npm run build
-
-      - name: Prepare deploy directory
-        run: cp -r functions dist/
+        env:
+          VITE_API_URL: https://overture-s3-proxy.zarbazan.workers.dev
 
       - name: Create Pages project if needed
         run: npx wrangler pages project create overture-maps --production-branch=master 2>/dev/null || true
