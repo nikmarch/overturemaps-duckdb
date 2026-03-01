@@ -20,8 +20,7 @@ flowchart TB
 
     S3[(Overture Maps S3\nGeoParquet files)]
 
-    UI -- "1. GET /tiles/{theme}/{type}\n?bbox&zoom" --> Worker
-    Worker -- "JSON: geohash list" --> UI
+    Grid -- "1. compute geohash cells\nfor viewport" --> UI
 
     UI -- "2. GET /tiles/{theme}/{type}/{hash}.arrow\n(CDN-cacheable)" --> Worker
     Worker --> Cache
@@ -37,13 +36,9 @@ flowchart TB
 
 ### Data flow in detail
 
-1. **Tile list** — browser sends viewport bbox + zoom to worker. Worker computes geohash cells covering the viewport and returns them as a JSON array.
+1. **Tile list** — browser computes geohash cells covering the viewport client-side using `grid.js`. No server round-trip needed — each geohash is a deterministic, CDN-cacheable URL.
 
-2. **Tile data** — browser fetches each geohash tile individually (`/{hash}.arrow`). These URLs are deterministic and CDN-cacheable (30-day `Cache-Control`). For each tile the worker:
-   - Decodes geohash to a bounding box
-   - Finds overlapping parquet files using a cached spatial index (parquet row-group statistics)
-   - Runs a DuckDB SQL query per file with a bbox WHERE clause
-   - Returns results as framed Arrow IPC: `[4-byte LE length][Arrow IPC bytes]` per frame
+2. **Tile data** — browser fetches each geohash tile individually (`/{hash}.arrow`). These URLs are deterministic and CDN-cacheable (30-day `Cache-Control`). The worker handles the tricky part: it decodes the geohash into a bbox, finds overlapping parquet files via a cached spatial index (row-group statistics), then loops through each file — spinning up a fresh DuckDB-WASM instance per file to run a bbox-filtered SQL query. This one-instance-per-file approach avoids WASM OOM in the 128 MB worker isolate. Results are concatenated as framed Arrow IPC: `[4-byte LE length][Arrow IPC bytes]` per file.
 
 3. **Render** — browser parses Arrow frames with [Flechette](https://github.com/uwdata/flechette), decodes WKB geometry, and renders GeoJSON features on the Leaflet map.
 
@@ -54,8 +49,7 @@ flowchart TB
 | `/releases` | GET | List available Overture Maps releases |
 | `/themes?release=X` | GET | List theme/type pairs for a release |
 | `/files?release&theme&type[&bbox]` | GET | List parquet files, optionally filtered by bbox |
-| `/tiles/{theme}/{type}?release&bbox&zoom` | GET | Geohash tile list for viewport |
-| `/tiles/{theme}/{type}/{hash}.arrow?release` | GET | Tile data as framed Arrow IPC |
+| `/tiles/{theme}/{type}/{hash}.arrow?release` | GET | Tile data as framed Arrow IPC (CDN-cached) |
 | `/query` | POST | Ad-hoc multi-file streaming query |
 | `/query/exec` | POST | Single-file query (Arrow IPC response) |
 | `/release/**` | * | S3 passthrough proxy |

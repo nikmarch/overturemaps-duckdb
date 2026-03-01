@@ -4,31 +4,9 @@ import wasmModule from '@ducklings/workers/wasm';
 
 const S3_BASE = 'https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com';
 
-// ── Inline geohash decode (duplicated from src/lib/grid.js) ──────────────────
+// ── Inline geohash decode (used by handleTile) ──────────────────────────────
 
 const BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz';
-
-function geohashEncode(lat, lon, precision = 6) {
-  let minLat = -90, maxLat = 90, minLon = -180, maxLon = 180;
-  let hash = '';
-  let isLon = true;
-  let bit = 0;
-  let ch = 0;
-  while (hash.length < precision) {
-    if (isLon) {
-      const mid = (minLon + maxLon) / 2;
-      if (lon >= mid) { ch = (ch << 1) | 1; minLon = mid; }
-      else            { ch = ch << 1;       maxLon = mid; }
-    } else {
-      const mid = (minLat + maxLat) / 2;
-      if (lat >= mid) { ch = (ch << 1) | 1; minLat = mid; }
-      else            { ch = ch << 1;       maxLat = mid; }
-    }
-    isLon = !isLon;
-    if (++bit === 5) { hash += BASE32[ch]; ch = 0; bit = 0; }
-  }
-  return hash;
-}
 
 function geohashDecodeBbox(hash) {
   let minLat = -90, maxLat = 90, minLon = -180, maxLon = 180;
@@ -47,28 +25,6 @@ function geohashDecodeBbox(hash) {
     }
   }
   return { ymin: minLat, xmin: minLon, ymax: maxLat, xmax: maxLon };
-}
-
-function geohashesForBbox(bbox, precision) {
-  const hashes = new Set();
-  const sample = geohashDecodeBbox(geohashEncode(bbox.ymin, bbox.xmin, precision));
-  const stepLat = sample.ymax - sample.ymin;
-  const stepLon = sample.xmax - sample.xmin;
-  const latStart = Math.floor(bbox.ymin / stepLat) * stepLat;
-  const lonStart = Math.floor(bbox.xmin / stepLon) * stepLon;
-  for (let lat = latStart; lat < bbox.ymax; lat += stepLat) {
-    for (let lon = lonStart; lon < bbox.xmax; lon += stepLon) {
-      hashes.add(geohashEncode(lat + stepLat / 2, lon + stepLon / 2, precision));
-    }
-  }
-  return [...hashes];
-}
-
-function precisionForZoom(zoom) {
-  if (zoom >= 16) return 6;
-  if (zoom >= 12) return 5;
-  if (zoom >= 8) return 4;
-  return 3;
 }
 
 // Cache TTLs: production = 1 day, dev/preview = 1 minute
@@ -138,12 +94,6 @@ export default {
     if (url.pathname === '/files') return handleFiles(ctx, url, ttl);
     if (url.pathname === '/query/exec' && request.method === 'POST') return handleQueryExec(request);
     if (url.pathname === '/query' && request.method === 'POST') return handleQuery(request);
-
-    // Tile list: returns geohashes covering the viewport
-    const tileListMatch = url.pathname.match(/^\/tiles\/([^/]+\/[^/]+)$/);
-    if (tileListMatch && request.method === 'GET') {
-      return handleTileList(url, tileListMatch);
-    }
 
     // Tile data: geohash-based cells for CDN caching
     const tilesMatch = url.pathname.match(
@@ -536,30 +486,6 @@ function buildTileColumns(themeKey) {
     '(bbox.ymin + bbox.ymax) / 2 as centroid_lat',
     ...defs.map((f, i) => `CAST(${f.sql} AS VARCHAR) as _f${i}`),
   ];
-}
-
-// ── GET /tiles/{theme}/{type}?release&xmin&ymin&xmax&ymax&zoom ──────────────
-
-async function handleTileList(url, match) {
-  const release = url.searchParams.get('release');
-  if (!release) return json({ error: 'Missing ?release' }, { status: 400 });
-
-  const xmin = parseFloat(url.searchParams.get('xmin'));
-  const ymin = parseFloat(url.searchParams.get('ymin'));
-  const xmax = parseFloat(url.searchParams.get('xmax'));
-  const ymax = parseFloat(url.searchParams.get('ymax'));
-  const zoom = parseInt(url.searchParams.get('zoom'));
-
-  if ([xmin, ymin, xmax, ymax, zoom].some(isNaN)) {
-    return json({ error: 'Missing bbox/zoom params' }, { status: 400 });
-  }
-
-  const precision = precisionForZoom(zoom);
-  const hashes = geohashesForBbox({ xmin, ymin, xmax, ymax }, precision);
-
-  return json(hashes, {
-    headers: { 'Cache-Control': 'no-store' },
-  });
 }
 
 // ── GET /tiles/{theme}/{type}/{geohash}.arrow ────────────────────────────────

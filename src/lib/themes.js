@@ -2,6 +2,7 @@ import L from 'leaflet';
 import { PROXY, PALETTE_16, THEME_COLORS, DEFAULT_COLOR } from './constants.js';
 import { query, queryTile } from './duckdb.js';
 import { getMap, getBbox, getZoom, bboxContains } from './map.js';
+import { precisionForZoom, geohashesForBbox } from './grid.js';
 import { buildQueryParams } from './query.js';
 import { renderFeature } from './render.js';
 import { darkenHex } from './render.js';
@@ -204,11 +205,10 @@ export async function loadTheme(key, snapviewId) {
     if (!useCache) {
       log(`Loading ${type}...`);
 
-      // 1. Get geohash tile list from worker
+      // 1. Compute geohash tiles client-side
       const zoom = getZoom();
-      const tilesUrl = `${PROXY}/tiles/${key}?release=${currentRelease}&xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}&zoom=${zoom}`;
-      const tilesRes = await fetch(tilesUrl, { signal: ac.signal });
-      const hashes = await tilesRes.json();
+      const precision = precisionForZoom(zoom, key);
+      const hashes = geohashesForBbox(bbox, precision);
       fileCount = hashes.length;
 
       const metaText = `${hashes.length} tiles`;

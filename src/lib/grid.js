@@ -68,9 +68,31 @@ export function geohashesForBbox(bbox, precision) {
   return [...hashes];
 }
 
-export function precisionForZoom(zoom) {
+/**
+ * Base precision from zoom level.
+ * Themes can shift this up/down via PRECISION_OFFSET.
+ */
+function basePrecision(zoom) {
   if (zoom >= 16) return 6;
   if (zoom >= 12) return 5;
   if (zoom >= 8) return 4;
   return 3;
+}
+
+// Per-theme offset: negative = coarser (bigger tiles), positive = finer (smaller tiles)
+const PRECISION_OFFSET = {
+  'divisions/division':          -1,
+  'divisions/division_area':     -2,
+  'divisions/division_boundary': -1,
+  'base/land':                   -1,
+  'base/land_cover':             -1,
+  'base/water':                  -1,
+  'base/bathymetry':             -1,
+  'addresses/address':            1,
+};
+
+export function precisionForZoom(zoom, themeKey) {
+  const base = basePrecision(zoom);
+  const offset = PRECISION_OFFSET[themeKey] || 0;
+  return Math.max(1, Math.min(6, base + offset));
 }
