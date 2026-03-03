@@ -16,6 +16,7 @@ import {
   getThemeColor, getRenderLimit, updateStats, initTheme, assignColors,
   log, setThemeUi, formatDuration,
 } from './themes.js';
+import { loadTable, themeKeyToTable } from './localdb.js';
 
 const RENDER_BATCH = 500;
 
@@ -143,7 +144,7 @@ export async function loadTheme(key, snapviewId) {
         let rendered = 0;
 
         // 2. Fetch each geohash tile individually (CDN-cached)
-        const CONCURRENCY = 6;
+        const CONCURRENCY = 3;
         for (let i = 0; i < hashes.length; i += CONCURRENCY) {
           if (ac.signal.aborted) throw new DOMException('Aborted', 'AbortError');
           const batch = hashes.slice(i, i + CONCURRENCY);
@@ -193,6 +194,9 @@ export async function loadTheme(key, snapviewId) {
 
       state.bbox = { ...bbox };
       state.loadedCount = state.cachedRows?.length || 0;
+
+      // Sync to local DuckDB WASM for console SQL queries
+      loadTable(themeKeyToTable(key), state.cachedRows).catch(() => {});
     } else {
       log(`Querying cached ${type}...`);
       const renderLimit = getRenderLimit(svCap);

@@ -21,11 +21,18 @@ services:
 
   worker:
     build: ./worker
+    restart: unless-stopped
     working_dir: /app
     volumes:
       - ./worker/src:/app/src:ro
       - ./worker/wrangler.jsonc:/app/wrangler.jsonc:ro
       - ./worker/vite.config.js:/app/vite.config.js:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/releases').then(r=>{if(!r.ok)throw 1}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     command: sh -c "npx vite build && npx wrangler dev --local --port 8787 --ip 0.0.0.0"
 
 volumes:
