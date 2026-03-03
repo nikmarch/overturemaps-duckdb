@@ -13,19 +13,32 @@ jobs:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - name: Delete preview deployments for branch
+      - name: Compute worker name
+        id: vars
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          SANITIZED=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//' | cut -c1-44)
+          echo "worker_name=overture-s3-proxy-${SANITIZED}" >> $GITHUB_OUTPUT
+
+      - name: Delete preview worker
+        run: |
+          WORKER_NAME="${{ steps.vars.outputs.worker_name }}"
+          echo "Deleting worker ${WORKER_NAME}..."
+          curl -s -X DELETE \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/${WORKER_NAME}" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.success'
+
+      - name: Delete preview Pages deployments
         run: |
           BRANCH="${{ github.head_ref }}"
           PROJECT="overture-maps"
 
-          # List all deployments for this branch
           DEPLOYMENTS=$(curl -s "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT/deployments" \
             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             | jq -r ".result[] | select(.deployment_trigger.metadata.branch == \"$BRANCH\") | .id")
 
-          # Delete each deployment
           for id in $DEPLOYMENTS; do
-            echo "Deleting deployment $id..."
+            echo "Deleting Pages deployment $id..."
             curl -s -X DELETE "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT/deployments/$id?force=true" \
               -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.success'
           done
