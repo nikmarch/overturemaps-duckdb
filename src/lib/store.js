@@ -12,7 +12,6 @@ export const useStore = create(subscribeWithSelector((set, get) => ({
   themes: [],
   themeUi: {},
   showSnapviews: true,
-  highlightIntersections: false,
   viewportCap: Number.isFinite(savedCap) ? savedCap : DEFAULT_VIEWPORT_CAP,
   viewportStats: { shownText: '-', enabledCount: 0, totalThemes: 0, viewportText: '-', totalRendered: 0 },
   snapviews: [],
@@ -135,11 +134,3 @@ export function updateSnapviewCap(snapviewId, cap) {
     ),
   }));
 }
-
-// --- Selectors (replace Svelte derived stores) ---
-
-export const selectThemeList = (s) =>
-  [...s.themes].sort((a, b) => `${a.theme}/${a.type}`.localeCompare(`${b.theme}/${b.type}`));
-
-export const selectSortedSnapviews = (s) =>
-  [...s.snapviews].sort((a, b) => b.ts - a.ts);

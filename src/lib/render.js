@@ -1,6 +1,5 @@
 import L from 'leaflet';
 import { getMap } from './map.js';
-import { intersectionInfoByPointId, isIntersectionMode } from './intersections.js';
 
 export function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
@@ -59,32 +58,20 @@ function attachZoomLink(layer, opts = {}) {
 
 export function renderFeature(row, state, color, extraFields = []) {
   const geomType = (row.geom_type || '').toUpperCase();
-  const intersectionMode = isIntersectionMode();
   let leafletObj;
 
   const isDivisions = state?.key?.startsWith?.('divisions/');
-  const intersects = intersectionMode && geomType.includes('POINT') && intersectionInfoByPointId.has(row.id);
 
   if (geomType.includes('POINT')) {
     if (row.centroid_lat && row.centroid_lon) {
       const latlng = [Number(row.centroid_lat), Number(row.centroid_lon)];
-      if (intersects) {
-        leafletObj = L.marker(latlng, {
-          icon: L.divIcon({
-            className: 'intersection-cross',
-            iconSize: [12, 12],
-            iconAnchor: [6, 6],
-          }),
-        });
-      } else {
-        leafletObj = L.circleMarker(latlng, {
-          radius: 3,
-          fillColor: color.fill,
-          color: color.stroke,
-          weight: 1,
-          fillOpacity: 0.95,
-        });
-      }
+      leafletObj = L.circleMarker(latlng, {
+        radius: 3,
+        fillColor: color.fill,
+        color: color.stroke,
+        weight: 1,
+        fillOpacity: 0.95,
+      });
     }
   } else if (geomType.includes('POLYGON')) {
     if (row.geojson) {
@@ -117,15 +104,6 @@ export function renderFeature(row, state, color, extraFields = []) {
       const val = row[`_f${i}`];
       if (val != null && val !== '') {
         popup += `<br><small>${extraFields[i].label}: ${val}</small>`;
-      }
-    }
-
-    if (intersectionMode && geomType.includes('POINT')) {
-      const info = intersectionInfoByPointId.get(row.id);
-      if (info?.hits?.length) {
-        popup += `<br><small>intersects: ${info.hits.join(', ')}</small>`;
-      } else {
-        popup += `<br><small>intersects: none</small>`;
       }
     }
 

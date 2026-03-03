@@ -1,14 +1,13 @@
-import { PROXY } from './constants.js';
 import { getMap, getBbox, getViewportString, bboxContains, lockMap, unlockMap } from './map.js';
 import {
-  onReleaseChange, toggleTheme, setThemeLimit,
   themeState, currentRelease,
-  clearAllThemes, updateStats,
-  enableThemeFromCache, disableTheme,
+  clearAllThemes, updateStats, disableTheme,
 } from './themes.js';
-import { clearIntersectionState, setIntersectionMode, recomputeIntersections } from './intersections.js';
+import {
+  onReleaseChange, toggleTheme, setThemeLimit,
+  enableThemeFromCache, rerenderAllEnabled,
+} from './loader.js';
 import { clearSnapviews, setShowSnapviews } from './snapviews.js';
-import { rerenderAllEnabled } from './themes.js';
 import {
   useStore,
   createSnapview,
@@ -21,9 +20,7 @@ import {
   updateSnapviewCap,
 } from './store.js';
 
-export { onReleaseChange as setRelease };
-export { toggleTheme };
-export { setThemeLimit };
+export { onReleaseChange as setRelease, toggleTheme, setThemeLimit };
 
 // The currently active snapview id
 let activeSnapviewId = null;
@@ -194,7 +191,6 @@ export async function clearCache() {
   useStore.setState({ activeSnapview: null });
 
   clearSnapviews();
-  clearIntersectionState();
   clearAllThemes();
 
   updateStats();
@@ -245,11 +241,4 @@ export async function refreshViewport(snapviewId) {
   useStore.setState({ status: { text: 'Refreshing viewport...', type: 'loading' } });
   await rerenderAllEnabled(sv.cap);
   useStore.setState({ status: { text: 'Viewport refreshed', type: 'success' } });
-}
-
-export async function setHighlightIntersections(v) {
-  useStore.setState({ highlightIntersections: v });
-  setIntersectionMode(v);
-  await recomputeIntersections(themeState, currentRelease);
-  rerenderAllEnabled();
 }

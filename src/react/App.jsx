@@ -4,7 +4,7 @@ import LoadModal from './components/LoadModal';
 import StatusBar from './components/StatusBar';
 import { loadArea } from '../lib/controller.js';
 import { initMap } from '../lib/map.js';
-import { loadReleases } from '../lib/themes.js';
+import { loadReleases } from '../lib/loader.js';
 import { initSnapviewsLayer } from '../lib/snapviews.js';
 import { onMapMove } from '../lib/controller.js';
 import { useStore } from '../lib/store.js';

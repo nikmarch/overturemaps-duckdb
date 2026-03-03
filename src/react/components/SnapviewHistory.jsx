@@ -1,6 +1,6 @@
 import { useState, useMemo, useRef, useCallback } from 'react';
 import { useStore, updateSnapviewCap } from '../../lib/store.js';
-import { restoreSnapview, deleteSnapview, toggleSnapviewTheme, setHighlightIntersections, onSnapviewCapChange, refreshViewport } from '../../lib/controller.js';
+import { restoreSnapview, deleteSnapview, toggleSnapviewTheme, onSnapviewCapChange, refreshViewport } from '../../lib/controller.js';
 import { getThemeColor } from '../../lib/themes.js';
 
 function formatTs(ms) {
@@ -53,7 +53,6 @@ export default function SnapviewHistory() {
   );
   const activeSnapview = useStore(s => s.activeSnapview);
   const themeUi = useStore(s => s.themeUi);
-  const highlightIntersections = useStore(s => s.highlightIntersections);
 
   function handleDelete(e, svId) {
     e.stopPropagation();
@@ -74,11 +73,6 @@ export default function SnapviewHistory() {
   function handleRestore(e, sv) {
     e.stopPropagation();
     restoreSnapview(sv);
-  }
-
-  function handleIntersections(e) {
-    e.stopPropagation();
-    setHighlightIntersections(!highlightIntersections);
   }
 
   function themeRowCount(sv, key) {
@@ -227,12 +221,6 @@ export default function SnapviewHistory() {
                   <div className="snapview-actions">
                     <button className="snapview-action-btn" onClick={(e) => handleRestore(e, sv)}>
                       Restore viewport
-                    </button>
-                    <button
-                      className={`snapview-action-btn ${highlightIntersections ? 'active-toggle' : ''}`}
-                      onClick={handleIntersections}
-                    >
-                      {highlightIntersections ? 'Hide' : 'Show'} intersections
                     </button>
                   </div>
                 </div>

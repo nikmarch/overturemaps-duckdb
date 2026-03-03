@@ -56,6 +56,13 @@ export function lockMap() {
   map.getContainer().classList.add('map-locked');
 }
 
+export function filterByBbox(rows, bbox) {
+  return rows.filter(r =>
+    r.centroid_lon >= bbox.xmin && r.centroid_lon <= bbox.xmax &&
+    r.centroid_lat >= bbox.ymin && r.centroid_lat <= bbox.ymax
+  );
+}
+
 export function unlockMap() {
   if (!map) return;
   map.dragging.enable();
