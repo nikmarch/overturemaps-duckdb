@@ -10,20 +10,20 @@ env:
 
 jobs:
   cleanup:
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - name: Delete preview deployments for branch
+      - name: Delete preview worker
+        run: npx wrangler delete --name overture-preview --force
+
+      - name: Delete preview Pages deployments
         run: |
           BRANCH="${{ github.head_ref }}"
           PROJECT="overture-maps"
 
-          # List all deployments for this branch
           DEPLOYMENTS=$(curl -s "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT/deployments" \
             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             | jq -r ".result[] | select(.deployment_trigger.metadata.branch == \"$BRANCH\") | .id")
 
-          # Delete each deployment
           for id in $DEPLOYMENTS; do
             echo "Deleting deployment $id..."
             curl -s -X DELETE "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT/deployments/$id?force=true" \

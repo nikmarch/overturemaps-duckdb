@@ -40,7 +40,7 @@ jobs:
         id: worker-name
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "name=overture-s3-proxy-preview" >> "$GITHUB_OUTPUT"
+            echo "name=overture-preview" >> "$GITHUB_OUTPUT"
           else
             echo "name=overture-s3-proxy" >> "$GITHUB_OUTPUT"
           fi

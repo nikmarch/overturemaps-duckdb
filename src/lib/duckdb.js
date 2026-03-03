@@ -6,8 +6,7 @@ import { tableFromIPC } from '@uwdata/flechette';
  */
 export async function queryTile(url, { signal } = {}) {
   const res = await fetch(url, { signal });
-  if (res.status === 204) return { rows: [] };
-  if (!res.ok) return { rows: [] };
+  if (res.status === 204 || !res.ok) return { rows: [] };
 
   const buf = new Uint8Array(await res.arrayBuffer());
   const rows = [];

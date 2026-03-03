@@ -3,6 +3,8 @@ import { init, DuckDB, tableToIPC } from '@ducklings/workers';
 import wasmModule from '@ducklings/workers/wasm';
 
 const S3_BASE = 'https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com';
+const S3_BUCKET = 'overturemaps-us-west-2';
+const S3_REGION = 'us-west-2';
 
 // ── Inline geohash decode (used by handleTile) ──────────────────────────────
 
@@ -37,7 +39,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
   'Access-Control-Allow-Headers': '*',
   'Access-Control-Expose-Headers':
-    'Content-Length, Content-Range, Accept-Ranges, X-Total-Files, X-Filtered-Files, X-Cache, X-Index-Status, X-Row-Count, Retry-After',
+    'Content-Length, Content-Range, Accept-Ranges, X-Total-Files, X-Filtered-Files, X-Cache, X-Index-Status, X-Row-Count, X-Page, X-Total-Pages, X-Has-More, Retry-After',
 };
 
 // ── Lazy DuckDB init (once per isolate) ──────────────────────────────────────
@@ -54,6 +56,15 @@ async function ensureDb() {
   }
   dbInstance = new DuckDB({ customConfig: { memory_limit: '100MB' } });
   connInstance = dbInstance.connect();
+  // Configure anonymous S3 access for the public Overture Maps bucket
+  await connInstance.execute(`
+    CREATE OR REPLACE SECRET overture_s3 (
+      TYPE S3,
+      KEY_ID '',
+      SECRET '',
+      REGION '${S3_REGION}'
+    )
+  `);
   return connInstance;
 }
 
@@ -100,7 +111,7 @@ export default {
       /^\/tiles\/([^/]+\/[^/]+)\/([0-9b-hjkmnp-z]{1,12})\.arrow$/
     );
     if (tilesMatch && request.method === 'GET') {
-      return handleTile(ctx, url, tilesMatch, request, env, ttl);
+      return handleTile(url, tilesMatch);
     }
 
     // S3 proxy: passthrough for /release/... parquet files and listing XML
@@ -108,7 +119,7 @@ export default {
   },
 };
 
-// ── POST /query/exec — single-file Arrow IPC executor ───────────────────────
+// ── POST /query/exec — multi-file Arrow IPC executor ────────────────────────
 
 async function handleQueryExec(request) {
   let body;
@@ -118,13 +129,13 @@ async function handleQueryExec(request) {
     return json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  const { file, columns, where, limit } = body;
-  if (!file || !Array.isArray(columns) || !where || !limit) {
-    return json({ error: 'Missing required fields: file, columns, where, limit' }, { status: 400 });
+  const { files, columns, where, limit } = body;
+  if (!files || !Array.isArray(columns) || !where || !limit) {
+    return json({ error: 'Missing required fields: files, columns, where, limit' }, { status: 400 });
   }
 
   try {
-    const table = await withLock(() => runQueryArrow(file, columns, where, limit));
+    const table = await withLock(() => runQueryArrow(files, columns, where, limit));
     const ipc = tableToIPC(table, { format: 'stream' });
     return new Response(ipc, {
       headers: {
@@ -136,11 +147,13 @@ async function handleQueryExec(request) {
   } catch (e) {
     resetDb();
     return json({ error: e.message }, { status: 500 });
+  } finally {
+    resetDb();
   }
 }
 
-// ── POST /query — orchestrator (streams framed Arrow IPC) ───────────────────
-// Binary frame format per file:
+// ── POST /query — range query (single read_parquet call across all files) ────
+// Binary frame format:
 //   [4-byte LE uint32 length][Arrow IPC bytes]
 // Error frame:
 //   [4-byte 0x00000000][4-byte LE error-json-length][error JSON bytes]
@@ -153,13 +166,14 @@ async function handleQuery(request) {
     return json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  const { files, columns, where, limit } = body;
+  const { files, pattern, columns, where, limit } = body;
+  const source = pattern ?? files; // pattern = s3:// glob string, files = array of keys
 
-  if (!Array.isArray(files) || !Array.isArray(columns) || !where || !limit) {
-    return json({ error: 'Missing required fields: files, columns, where, limit' }, { status: 400 });
+  if (!source || !Array.isArray(columns) || !where || !limit) {
+    return json({ error: 'Missing required fields: pattern or files, columns, where, limit' }, { status: 400 });
   }
 
-  if (files.length === 0) {
+  if (Array.isArray(source) && source.length === 0) {
     return new Response(new Uint8Array(0), {
       headers: { 'Content-Type': 'application/vnd.apache.arrow.stream', ...corsHeaders },
     });
@@ -168,47 +182,26 @@ async function handleQuery(request) {
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
 
-  // Adaptive per-file row cap: starts at 5000, scales up on success (max 10000),
-  // halves on OOM (floor 500). Retries the same file once with a smaller limit.
-  let perFileMax = 5000;
-
   const streamWork = withLock(async () => {
-    let totalRows = 0;
-    for (let i = 0; i < files.length && totalRows < limit; i++) {
-      const remaining = Math.min(limit - totalRows, perFileMax);
-      try {
-        const table = await runQueryArrow(files[i], columns, where, remaining);
+    try {
+      const table = await runQueryArrow(source, columns, where, limit);
+      if (table.numRows > 0) {
         const ipcBytes = new Uint8Array(tableToIPC(table, { format: 'stream' }));
-        totalRows += table.numRows;
-
-        // Write data frame: [4-byte length][Arrow IPC bytes]
         const lenBuf = new ArrayBuffer(4);
         new DataView(lenBuf).setUint32(0, ipcBytes.byteLength, true);
         await writer.write(new Uint8Array(lenBuf));
         await writer.write(ipcBytes);
-
-        // Success — try increasing limit for next file (up to 10000)
-        if (perFileMax < 10000) perFileMax = Math.min(perFileMax * 2, 10000);
-      } catch (e) {
-        resetDb();
-
-        if (e.message?.includes('Out of Memory') && remaining > 500) {
-          // Halve the limit and retry this file
-          perFileMax = Math.max(500, Math.floor(remaining / 2));
-          i--; // retry same file
-          continue;
-        }
-
-        // Write error frame: [4-byte 0x00000000][4-byte error-json-length][error JSON]
-        const errJson = new TextEncoder().encode(JSON.stringify({ error: e.message, file: i }));
-        const errHeader = new ArrayBuffer(8);
-        const errView = new DataView(errHeader);
-        errView.setUint32(0, 0, true); // zero signals error frame
-        errView.setUint32(4, errJson.byteLength, true);
-        await writer.write(new Uint8Array(errHeader));
-        await writer.write(errJson);
       }
-      // Free WASM memory between files to stay within 128MB isolate
+    } catch (e) {
+      resetDb();
+      const errJson = new TextEncoder().encode(JSON.stringify({ error: e.message }));
+      const errHeader = new ArrayBuffer(8);
+      const errView = new DataView(errHeader);
+      errView.setUint32(0, 0, true);
+      errView.setUint32(4, errJson.byteLength, true);
+      await writer.write(new Uint8Array(errHeader));
+      await writer.write(errJson);
+    } finally {
       resetDb();
     }
   });
@@ -220,10 +213,13 @@ async function handleQuery(request) {
   });
 }
 
-async function runQueryArrow(file, columns, where, limit) {
+// pattern: an s3:// glob string, or an array of relative S3 keys (HTTPS URLs)
+async function runQueryArrow(pattern, columns, where, limit) {
   const conn = await ensureDb();
-  const url = `'${S3_BASE}/${file}'`;
-  const sql = `SELECT ${columns.join(', ')} FROM read_parquet([${url}], hive_partitioning=false) WHERE ${where} LIMIT ${limit}`;
+  const src = typeof pattern === 'string'
+    ? `'${pattern}'`
+    : `[${pattern.map(f => `'${S3_BASE}/${f}'`).join(', ')}]`;
+  const sql = `SELECT ${columns.join(', ')} FROM read_parquet(${src}, hive_partitioning=false) WHERE ${where} LIMIT ${limit}`;
   return conn.queryArrow(sql);
 }
 
@@ -490,7 +486,7 @@ function buildTileColumns(themeKey) {
 
 // ── GET /tiles/{theme}/{type}/{geohash}.arrow ────────────────────────────────
 
-async function handleTile(ctx, url, match, request, env, ttl) {
+async function handleTile(url, match) {
   const release = url.searchParams.get('release');
   if (!release) return json({ error: 'Missing ?release' }, { status: 400 });
 
@@ -499,41 +495,34 @@ async function handleTile(ctx, url, match, request, env, ttl) {
   const [theme, type] = themeKey.split('/');
   const bbox = geohashDecodeBbox(geohash);
 
-  // Use cached bbox index to find overlapping files, fall back to full list
-  const files = await getTileFiles(release, theme, type, bbox);
-
-  if (files.length === 0) {
-    return new Response(null, {
-      status: 204,
-      headers: { 'Cache-Control': 'public, max-age=2592000', ...corsHeaders },
-    });
-  }
-
+  // S3 glob — DuckDB lists and scans all files in one query, no file listing needed
+  const pattern = `s3://${S3_BUCKET}/release/${release}/theme=${theme}/type=${type}/*.parquet`;
   const columns = buildTileColumns(themeKey);
   const where = `bbox.xmax >= ${bbox.xmin} AND bbox.xmin <= ${bbox.xmax} AND bbox.ymax >= ${bbox.ymin} AND bbox.ymin <= ${bbox.ymax}`;
-  const limit = 50000;
 
-  // Query DuckDB directly — self-fetch to *.workers.dev returns 404 inside CF Workers
-  const frames = await tileQueryLocal(files, columns, where, limit);
+  const ipcBytes = await withLock(async () => {
+    try {
+      const table = await runQueryArrow(pattern, columns, where, 50000);
+      if (table.numRows === 0) return null;
+      return new Uint8Array(tableToIPC(table, { format: 'stream' }));
+    } catch (e) {
+      return null;
+    } finally {
+      resetDb();
+    }
+  });
 
-  if (frames.length === 0) {
+  if (!ipcBytes) {
     return new Response(null, {
       status: 204,
       headers: { 'Cache-Control': 'public, max-age=2592000', ...corsHeaders },
     });
   }
 
-  // Assemble framed response: [4-byte LE length][Arrow IPC bytes] per frame
-  let totalLen = 0;
-  for (const f of frames) totalLen += 4 + f.byteLength;
-  const out = new Uint8Array(totalLen);
-  const view = new DataView(out.buffer);
-  let offset = 0;
-  for (const f of frames) {
-    view.setUint32(offset, f.byteLength, true);
-    out.set(f, offset + 4);
-    offset += 4 + f.byteLength;
-  }
+  // Framed response: [4-byte LE length][Arrow IPC bytes]
+  const out = new Uint8Array(4 + ipcBytes.byteLength);
+  new DataView(out.buffer).setUint32(0, ipcBytes.byteLength, true);
+  out.set(ipcBytes, 4);
 
   return new Response(out, {
     headers: {
@@ -544,50 +533,6 @@ async function handleTile(ctx, url, match, request, env, ttl) {
   });
 }
 
-// Query DuckDB directly for tile data
-async function tileQueryLocal(files, columns, where, limit) {
-  const frames = [];
-  let totalRows = 0;
-  let perFileMax = 5000;
-
-  await withLock(async () => {
-    for (let i = 0; i < files.length && totalRows < limit; i++) {
-      const remaining = Math.min(limit - totalRows, perFileMax);
-      try {
-        const table = await runQueryArrow(files[i], columns, where, remaining);
-        if (table.numRows > 0) {
-          frames.push(new Uint8Array(tableToIPC(table, { format: 'stream' })));
-          totalRows += table.numRows;
-        }
-        if (perFileMax < 10000) perFileMax = Math.min(perFileMax * 2, 10000);
-      } catch (e) {
-        resetDb();
-        if (e.message?.includes('Out of Memory') && remaining > 500) {
-          perFileMax = Math.max(500, Math.floor(remaining / 2));
-          i--;
-          continue;
-        }
-      }
-      resetDb();
-    }
-  });
-  return frames;
-}
-
-async function getTileFiles(release, theme, type, bbox) {
-  const cache = caches.default;
-  const indexKey = cacheKey('index', [release, theme, type]);
-  const hit = await cachedJson(cache, indexKey);
-  if (hit) {
-    return Object.keys(hit.data).filter(f => {
-      const b = hit.data[f];
-      return b.xmax >= bbox.xmin && b.xmin <= bbox.xmax && b.ymax >= bbox.ymin && b.ymin <= bbox.ymax;
-    });
-  }
-
-  // No index yet — return all files, DuckDB WHERE clause filters at query time
-  return listS3Files({ release, theme, type });
-}
 
 async function buildBboxIndex(files) {
   const concurrency = 5;
