@@ -4,79 +4,101 @@ import { useStore } from '../../lib/store.js';
 import { getConn } from '../../lib/duckdb.js';
 import { getMap } from '../../lib/map.js';
 import { getThemeColor, setThemeLayersVisible } from '../../lib/themes.js';
+import { THEME_FIELDS } from '../../lib/constants.js';
 
-const RESULT_COLOR = '#f97316';   // orange — matched rows
-const IXN_COLOR    = '#7c3aed';   // purple — ST_Intersection geometries
+const COLOR_A   = '#f97316';
+const COLOR_B   = '#06b6d4';
+const IXN_COLOR = '#7c3aed';
 
 const MODES = [
+  { id: 'show',      label: 'Show'      },
   { id: 'intersect', label: 'Intersect' },
   { id: 'within',    label: 'Within'    },
   { id: 'exclude',   label: 'Exclude'   },
-  { id: 'custom',    label: 'Custom'    },
 ];
 
-function buildQuery(mode, tableA, tableB, distance, customSql) {
-  if (mode === 'custom') return customSql;
+const B_COLS = `b.id, b.display_name, b.geom_type, ST_AsGeoJSON(b.geometry) as geojson, b.centroid_lon, b.centroid_lat`;
 
-  const cols    = 'a.id, a.display_name, a.geom_type, a.geojson, a.centroid_lon, a.centroid_lat';
-  const geomA   = 'ST_GeomFromGeoJSON(a.geojson)';
-  const geomB   = 'ST_GeomFromGeoJSON(b.geojson)';
+// tableA is stored as "theme_type"; key is "theme/type" (first _ only)
+function tableToKey(tableName) {
+  return tableName.replace('_', '/');
+}
+
+function buildQuery(mode, tableA, tableB, distance, limit = 2000) {
+  const cols    = `a.id, a.display_name, a.geom_type, ST_AsGeoJSON(a.geometry) as geojson, a.centroid_lon, a.centroid_lat`;
   const distDeg = (distance / 111320).toFixed(6);
   const preFlt  = `ABS(a.centroid_lon - b.centroid_lon) < 0.2\n  AND ABS(a.centroid_lat - b.centroid_lat) < 0.2`;
 
   switch (mode) {
+    case 'show':
+      return `SELECT * EXCLUDE (geometry),\n  ST_AsGeoJSON(geometry) AS geojson\nFROM "${tableA}"\nLIMIT ${limit}`;
     case 'intersect':
-      return `SELECT ${cols}\nFROM "${tableA}" a\nJOIN "${tableB}" b\n  ON ${preFlt}\n  AND ST_Intersects(${geomA}, ${geomB})\nLIMIT 2000`;
+      return `SELECT ${cols}\nFROM "${tableA}" a\nJOIN "${tableB}" b\n  ON ${preFlt}\n  AND ST_Intersects(a.geometry, b.geometry)\nLIMIT ${limit}`;
     case 'within':
-      return `SELECT ${cols}\nFROM "${tableA}" a\nWHERE EXISTS (\n  SELECT 1 FROM "${tableB}" b\n  WHERE ${preFlt}\n    AND ST_Distance(${geomA}, ${geomB}) < ${distDeg}\n)\nLIMIT 2000`;
+      return `SELECT ${cols}\nFROM "${tableA}" a\nWHERE EXISTS (\n  SELECT 1 FROM "${tableB}" b\n  WHERE ${preFlt}\n    AND ST_Distance(a.geometry, b.geometry) < ${distDeg}\n)\nLIMIT ${limit}`;
     case 'exclude':
-      return `SELECT ${cols}\nFROM "${tableA}" a\nWHERE NOT EXISTS (\n  SELECT 1 FROM "${tableB}" b\n  WHERE ${preFlt}\n    AND ST_Distance(${geomA}, ${geomB}) < ${distDeg}\n)\nLIMIT 2000`;
+      return `SELECT ${cols}\nFROM "${tableA}" a\nWHERE NOT EXISTS (\n  SELECT 1 FROM "${tableB}" b\n  WHERE ${preFlt}\n    AND ST_Distance(a.geometry, b.geometry) < ${distDeg}\n)\nLIMIT ${limit}`;
     default:
       return '';
   }
 }
 
-// Render Table A / Table B as dimmed background context
-async function renderContext(conn, tableName, fill, layer, cap = 2000) {
-  const res = await conn.query(
-    `SELECT geom_type, geojson, centroid_lon, centroid_lat FROM "${tableName}" LIMIT ${cap}`
-  );
-  for (const row of res.toArray()) {
-    const gt = (row.geom_type || '').toUpperCase();
-    try {
-      if (gt.includes('POINT') && row.centroid_lat != null) {
-        L.circleMarker([+row.centroid_lat, +row.centroid_lon], {
-          radius: 3, fillColor: fill, color: fill, weight: 1, fillOpacity: 0.35, opacity: 0.4,
-        }).addTo(layer);
-      } else if (row.geojson) {
-        L.geoJSON(JSON.parse(row.geojson), {
-          style: { fillColor: fill, color: fill, weight: 1, fillOpacity: 0.08, opacity: 0.3 },
-          pointToLayer: (_f, ll) => L.circleMarker(ll, {
-            radius: 3, fillColor: fill, color: fill, weight: 1, fillOpacity: 0.35, opacity: 0.4,
-          }),
-        }).addTo(layer);
-      }
-    } catch { /* skip */ }
+function buildMatchedBQuery(mode, tableA, tableB, distance, limit = 2000) {
+  const distDeg = (distance / 111320).toFixed(6);
+  const preFlt  = `ABS(a.centroid_lon - b.centroid_lon) < 0.2\n  AND ABS(a.centroid_lat - b.centroid_lat) < 0.2`;
+
+  switch (mode) {
+    case 'intersect':
+      return `SELECT DISTINCT ${B_COLS}\nFROM "${tableA}" a\nJOIN "${tableB}" b\n  ON ${preFlt}\n  AND ST_Intersects(a.geometry, b.geometry)\nLIMIT ${limit}`;
+    case 'within':
+      return `SELECT DISTINCT ${B_COLS}\nFROM "${tableA}" a\nJOIN "${tableB}" b\n  ON ${preFlt}\n  AND ST_Distance(a.geometry, b.geometry) < ${distDeg}\nLIMIT ${limit}`;
+    default:
+      return null;
   }
 }
 
-// Render matched result rows highlighted in orange
-function renderResults(rows, layer) {
+function makePopup(row, keyHint = '') {
+  const name = row.display_name ? String(row.display_name) : '';
+  const id   = row.id           ? String(row.id)           : '';
+  const defs = THEME_FIELDS[keyHint] || [];
+
+  const extras = [];
+  for (let i = 0; i < defs.length; i++) {
+    const val = row[`_f${i}`];
+    if (val != null && String(val) !== '') {
+      extras.push(`<tr><td style="color:#888;padding-right:8px;white-space:nowrap">${defs[i].label}</td>` +
+        `<td style="word-break:break-word">${val}</td></tr>`);
+    }
+  }
+
+  return `<div style="font:12px/1.5 sans-serif;max-width:260px">` +
+    `<b style="font-size:13px">${name || id}</b>` +
+    (extras.length ? `<table style="margin-top:4px;width:100%"><tbody>${extras.join('')}</tbody></table>` : '') +
+    (name && id ? `<br><small style="color:#bbb;word-break:break-all">${id}</small>` : '') +
+    `</div>`;
+}
+
+function renderRows(rows, layer, color, keyHint = '', pointRadius = 5) {
   let count = 0;
   for (const row of rows) {
+    const popup = makePopup(row, keyHint);
     try {
-      if (row.geojson) {
-        L.geoJSON(JSON.parse(typeof row.geojson === 'string' ? row.geojson : String(row.geojson)), {
-          style: { color: RESULT_COLOR, fillColor: RESULT_COLOR, weight: 2, fillOpacity: 0.45, opacity: 0.9 },
+      const geojsonStr = row.geojson
+        ? (typeof row.geojson === 'string' ? row.geojson : String(row.geojson))
+        : null;
+      if (geojsonStr) {
+        L.geoJSON(JSON.parse(geojsonStr), {
+          style: { color, fillColor: color, weight: 2, fillOpacity: 0.4, opacity: 0.85 },
+          onEachFeature: (_f, l) => l.bindPopup(popup),
           pointToLayer: (_f, ll) => L.circleMarker(ll, {
-            radius: 5, fillColor: RESULT_COLOR, color: '#fff', weight: 1.5, fillOpacity: 0.95,
-          }),
+            radius: pointRadius, fillColor: color, color: '#fff', weight: 1.5, fillOpacity: 0.9,
+          }).bindPopup(popup),
         }).addTo(layer);
         count++;
       } else if (row.centroid_lon != null && row.centroid_lat != null) {
         L.circleMarker([+row.centroid_lat, +row.centroid_lon], {
-          radius: 5, fillColor: RESULT_COLOR, color: '#fff', weight: 1.5, fillOpacity: 0.95,
-        }).addTo(layer);
+          radius: pointRadius, fillColor: color, color: '#fff', weight: 1.5, fillOpacity: 0.9,
+        }).bindPopup(popup).addTo(layer);
         count++;
       }
     } catch { /* skip */ }
@@ -84,22 +106,18 @@ function renderResults(rows, layer) {
   return count;
 }
 
-// For Intersect mode: compute and render the actual intersection geometries
 async function renderIntersectionGeoms(conn, tableA, tableB, layer) {
-  const geomA  = 'ST_GeomFromGeoJSON(a.geojson)';
-  const geomB  = 'ST_GeomFromGeoJSON(b.geojson)';
   const preFlt = `ABS(a.centroid_lon - b.centroid_lon) < 0.2 AND ABS(a.centroid_lat - b.centroid_lat) < 0.2`;
   try {
     const res = await conn.query(
-      `SELECT ST_AsGeoJSON(ST_Intersection(${geomA}, ${geomB})) AS ixn_geojson\n` +
+      `SELECT ST_AsGeoJSON(ST_Intersection(a.geometry, b.geometry)) AS ixn_geojson\n` +
       `FROM "${tableA}" a JOIN "${tableB}" b\n` +
-      `  ON ${preFlt} AND ST_Intersects(${geomA}, ${geomB})\nLIMIT 500`
+      `  ON ${preFlt} AND ST_Intersects(a.geometry, b.geometry)\nLIMIT 500`
     );
     for (const row of res.toArray()) {
       if (!row.ixn_geojson) continue;
       try {
         const geo = JSON.parse(row.ixn_geojson);
-        // Skip empty or point-only intersections
         if (!geo || geo.type === 'Point' || geo.type === 'MultiPoint') continue;
         if (geo.type === 'GeometryCollection' && !geo.geometries?.length) continue;
         L.geoJSON(geo, {
@@ -112,6 +130,7 @@ async function renderIntersectionGeoms(conn, tableA, tableB, layer) {
 
 export default function AnalysisPanel() {
   const snapviews = useStore(s => s.snapviews);
+  const viewportCap = useStore(s => s.viewportCap);
 
   const tables = useMemo(() => {
     const seen = new Set();
@@ -130,78 +149,82 @@ export default function AnalysisPanel() {
     return result;
   }, [snapviews]);
 
-  const [mode, setMode] = useState('intersect');
+  const [mode, setMode] = useState('show');
   const [tableA, setTableA] = useState('');
   const [tableB, setTableB] = useState('');
   const [distance, setDistance] = useState(100);
-  const [customSql, setCustomSql] = useState('');
-  const [sqlOpen, setSqlOpen] = useState(false);
+  const [sql, setSql] = useState('');
+  const [sqlOpen, setSqlOpen] = useState(true);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const layerRef = useRef(null);
 
+  // Seed tables on first load
   useEffect(() => {
     if (tables.length > 0 && !tableA) setTableA(tables[0].table);
     if (tables.length > 1 && !tableB) setTableB(tables[1].table);
     else if (tables.length === 1 && !tableB) setTableB(tables[0].table);
   }, [tables]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Regenerate SQL whenever controls change
+  useEffect(() => {
+    if (!tableA) return;
+    setSql(buildQuery(mode, tableA, tableB, distance, viewportCap));
+  }, [mode, tableA, tableB, distance, viewportCap]);
+
   useEffect(() => () => {
     if (layerRef.current) { layerRef.current.remove(); layerRef.current = null; }
     setThemeLayersVisible(true);
   }, []);
 
-  function handleModeChange(m) {
-    if (m === 'custom' && mode !== 'custom') {
-      setCustomSql(buildQuery(mode, tableA, tableB, distance, ''));
-      setSqlOpen(true);
-    }
-    setMode(m);
-  }
-
   async function run() {
     const conn = getConn();
-    const q = buildQuery(mode, tableA, tableB, distance, customSql);
-    if (!conn || !q.trim()) return;
+    if (!conn || !sql.trim()) return;
 
     setRunning(true);
     setError(null);
     setResult(null);
 
-    // Clear previous layer
     if (layerRef.current) { layerRef.current.remove(); layerRef.current = null; }
-
-    const isPreset = mode !== 'custom';
-    if (isPreset) setThemeLayersVisible(false);
+    setThemeLayersVisible(false);
 
     try {
       const layer = L.layerGroup().addTo(getMap());
       layerRef.current = layer;
 
-      if (isPreset) {
-        // Render Table A and Table B as dimmed context
-        const colorA = tables.find(t => t.table === tableA)?.color || { fill: '#888' };
-        const colorB = tables.find(t => t.table === tableB)?.color || { fill: '#888' };
-        await renderContext(conn, tableA, colorA.fill, layer);
-        if (tableB !== tableA) await renderContext(conn, tableB, colorB.fill, layer);
-      }
-
-      // Run main query → highlighted results
-      const res = await conn.query(q);
+      const res = await conn.query(sql);
       const rows = res.toArray();
-      const count = renderResults(rows, layer);
 
-      // Intersect mode: also draw the actual intersection geometries
-      if (mode === 'intersect') {
-        await renderIntersectionGeoms(conn, tableA, tableB, layer);
+      const keyA = tableToKey(tableA);
+
+      if (mode === 'show') {
+        // Use theme color for show mode
+        const color = (getThemeColor(keyA) || {}).fill || COLOR_A;
+        const count = renderRows(rows, layer, color, keyA, 5);
+        setResult({ count, total: rows.length });
+      } else {
+        // Table A results (orange)
+        const count = renderRows(rows, layer, COLOR_A, keyA, 5);
+
+        // Table B matched features (cyan)
+        const bq = buildMatchedBQuery(mode, tableA, tableB, distance, viewportCap);
+        if (bq && tableB !== tableA) {
+          const bRes = await conn.query(bq);
+          renderRows(bRes.toArray(), layer, COLOR_B, tableToKey(tableB), 4);
+        }
+
+        // Intersect mode: draw ST_Intersection areas (purple)
+        if (mode === 'intersect') {
+          await renderIntersectionGeoms(conn, tableA, tableB, layer);
+        }
+
+        setResult({ count, total: rows.length });
       }
-
-      setResult({ count, total: rows.length });
     } catch (e) {
       setError(e.message || String(e));
       if (layerRef.current) { layerRef.current.remove(); layerRef.current = null; }
-      if (isPreset) setThemeLayersVisible(true);
+      setThemeLayersVisible(true);
     } finally {
       setRunning(false);
     }
@@ -220,9 +243,8 @@ export default function AnalysisPanel() {
 
   if (tables.length === 0) return null;
 
-  const isCustom = mode === 'custom';
+  const needsB = mode !== 'show';
   const needsDistance = mode === 'within' || mode === 'exclude';
-  const displaySql = isCustom ? customSql : buildQuery(mode, tableA, tableB, distance, '');
 
   return (
     <div className="analysis-panel" onClick={e => e.stopPropagation()}>
@@ -231,7 +253,7 @@ export default function AnalysisPanel() {
           <button
             key={m.id}
             className={`analysis-mode-tab ${mode === m.id ? 'active' : ''}`}
-            onClick={() => handleModeChange(m.id)}
+            onClick={() => setMode(m.id)}
           >{m.label}</button>
         ))}
         {result && (
@@ -241,31 +263,33 @@ export default function AnalysisPanel() {
         )}
       </div>
 
-      {!isCustom && (
-        <div className="analysis-form">
-          <div className="analysis-row">
-            <select className="analysis-select" value={tableA} onChange={e => setTableA(e.target.value)}>
-              {tables.map(t => <option key={t.table} value={t.table}>{t.label}</option>)}
-            </select>
-            <span className="analysis-connector">
-              {mode === 'intersect' ? '∩' : mode === 'within' ? '⊂' : '∖'}
-            </span>
-            <select className="analysis-select" value={tableB} onChange={e => setTableB(e.target.value)}>
-              {tables.map(t => <option key={t.table} value={t.table}>{t.label}</option>)}
-            </select>
-            {needsDistance && (
-              <div className="analysis-distance">
-                <input
-                  type="number" className="analysis-dist-input"
-                  value={distance} min={1} step={50}
-                  onChange={e => setDistance(Number(e.target.value))}
-                />
-                <span className="analysis-dist-unit">m</span>
-              </div>
-            )}
-          </div>
+      <div className="analysis-form">
+        <div className="analysis-row">
+          <select className="analysis-select" value={tableA} onChange={e => setTableA(e.target.value)}>
+            {tables.map(t => <option key={t.table} value={t.table}>{t.label}</option>)}
+          </select>
+          {needsB && (
+            <>
+              <span className="analysis-connector">
+                {mode === 'intersect' ? '∩' : mode === 'within' ? '⊂' : '∖'}
+              </span>
+              <select className="analysis-select" value={tableB} onChange={e => setTableB(e.target.value)}>
+                {tables.map(t => <option key={t.table} value={t.table}>{t.label}</option>)}
+              </select>
+            </>
+          )}
+          {needsDistance && (
+            <div className="analysis-distance">
+              <input
+                type="number" className="analysis-dist-input"
+                value={distance} min={1} step={50}
+                onChange={e => setDistance(Number(e.target.value))}
+              />
+              <span className="analysis-dist-unit">m</span>
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
       <div className="analysis-sql-section">
         <button className="analysis-sql-toggle" onClick={() => setSqlOpen(o => !o)}>
@@ -273,10 +297,9 @@ export default function AnalysisPanel() {
         </button>
         {sqlOpen && (
           <textarea
-            className={`analysis-sql${isCustom ? '' : ' readonly'}`}
-            value={displaySql}
-            onChange={isCustom ? e => setCustomSql(e.target.value) : undefined}
-            readOnly={!isCustom}
+            className="analysis-sql"
+            value={sql}
+            onChange={e => setSql(e.target.value)}
             onKeyDown={handleKeyDown}
             spellCheck={false}
             rows={5}

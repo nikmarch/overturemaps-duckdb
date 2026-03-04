@@ -295,6 +295,11 @@ export async function loadTheme(key, snapviewId) {
           await new Promise(r => setTimeout(r, 0));
         }
       }
+      // Build R-tree spatial index for fast geometry queries
+      try {
+        await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
+      } catch { /* RTREE may not be available in this WASM build */ }
+
       state.bbox = { ...bbox };
       state.loadedCount = state.markers.length;
     } else {

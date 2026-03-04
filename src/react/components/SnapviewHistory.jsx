@@ -1,7 +1,7 @@
-import { useState, useMemo, useRef, useCallback } from 'react';
-import { useStore, updateSnapviewCap } from '../../lib/store.js';
-import { deleteSnapview, toggleSnapviewTheme, onSnapviewCapChange, reloadFromMeta } from '../../lib/controller.js';
-import { getThemeColor } from '../../lib/themes.js';
+import { useRef, useCallback, useMemo } from 'react';
+import { useStore } from '../../lib/store.js';
+import { deleteSnapview, reloadFromMeta } from '../../lib/controller.js';
+import { getThemeColor, rerenderAllEnabled } from '../../lib/themes.js';
 import AnalysisPanel from './AnalysisPanel.jsx';
 
 function formatTs(ms) {
@@ -24,28 +24,23 @@ function progressPct(sv) {
 }
 
 export default function SnapviewHistory() {
-  const [expandedId, setExpandedId] = useState(null);
   const snapviews = useStore(s => s.snapviews);
+  const viewportCap = useStore(s => s.viewportCap);
+  const themeUi = useStore(s => s.themeUi);
+
   const sortedSnapviews = useMemo(
     () => [...snapviews].sort((a, b) => b.ts - a.ts),
     [snapviews],
   );
-  const themeUi = useStore(s => s.themeUi);
 
   const capTimerRef = useRef(null);
-  const handleCapChange = useCallback((svId, value) => {
-    updateSnapviewCap(svId, value);
+  const handleCapChange = useCallback((value) => {
+    useStore.setState({ viewportCap: value });
     if (capTimerRef.current) clearTimeout(capTimerRef.current);
-    capTimerRef.current = setTimeout(() => onSnapviewCapChange(svId, value), 300);
+    capTimerRef.current = setTimeout(() => rerenderAllEnabled(value), 300);
   }, []);
 
-  function handleCardClick(sv) {
-    if (sv.hasData === false) {
-      reloadFromMeta(sv);
-      return;
-    }
-    setExpandedId(expandedId === sv.id ? null : sv.id);
-  }
+  const hasLiveData = sortedSnapviews.some(sv => sv.status === 'done' && sv.hasData !== false);
 
   if (sortedSnapviews.length === 0) return null;
 
@@ -53,20 +48,20 @@ export default function SnapviewHistory() {
     <div className="snapview-panel">
       <div className="snapview-list">
         {sortedSnapviews.map(sv => {
-          const isExpanded = expandedId === sv.id;
           const isDone = sv.status === 'done';
           const hasData = sv.hasData !== false;
 
           return (
-            <div key={sv.id} className={`sv-card ${sv.status}${isExpanded ? ' expanded' : ''}`}>
+            <div key={sv.id} className={`sv-card ${sv.status}`}>
 
               {/* ── Header row ── */}
               <div
-                className="sv-card-row"
-                role="button"
-                tabIndex={0}
-                onClick={() => handleCardClick(sv)}
-                onKeyDown={e => e.key === 'Enter' && handleCardClick(sv)}
+                className={`sv-card-row${!hasData ? ' clickable' : ''}`}
+                role={!hasData ? 'button' : undefined}
+                tabIndex={!hasData ? 0 : undefined}
+                onClick={!hasData ? () => reloadFromMeta(sv) : undefined}
+                onKeyDown={!hasData ? (e => e.key === 'Enter' && reloadFromMeta(sv)) : undefined}
+                title={!hasData ? 'Click to reload this area' : undefined}
               >
                 <div className="sv-card-dots">
                   {sv.keys.slice(0, 4).map(key => (
@@ -107,38 +102,22 @@ export default function SnapviewHistory() {
                 >&times;</button>
               </div>
 
-              {/* ── Expanded: theme toggles + cap ── */}
-              {isExpanded && isDone && hasData && (
-                <div className="sv-card-expanded" onClick={e => e.stopPropagation()}>
+              {/* ── Per-theme meta chips (always visible) ── */}
+              {isDone && hasData && sv.keys.length > 0 && (
+                <div className="sv-card-meta">
                   {sv.keys.map(key => {
                     const color = getThemeColor(key);
-                    const enabled = themeUi[key]?.enabled ?? false;
-                    const ts = sv.themeStats[key];
                     const live = themeUi[key]?.rowCount;
-                    const count = live ?? ts?.rowCount;
+                    const stored = sv.themeStats[key]?.rowCount;
+                    const count = live ?? stored;
                     return (
-                      <label key={key} className="sv-theme-row">
-                        <input
-                          type="checkbox"
-                          checked={enabled}
-                          onChange={e => toggleSnapviewTheme(sv.id, key, e.target.checked)}
-                        />
-                        <span className="sv-theme-dot" style={{ background: color?.fill || '#999' }} />
-                        <span className="sv-theme-name">{key.split('/')[1]}</span>
-                        {count != null && <span className="sv-theme-count">{count.toLocaleString()}</span>}
-                      </label>
+                      <span key={key} className="sv-meta-chip">
+                        <span className="sv-meta-dot" style={{ background: color?.fill || '#999' }} />
+                        {key.split('/')[1]}
+                        {count != null && <span className="sv-meta-count">{count.toLocaleString()}</span>}
+                      </span>
                     );
                   })}
-                  <div className="sv-cap-row">
-                    <span className="sv-cap-label">Cap</span>
-                    <input
-                      type="range" className="sv-cap-slider"
-                      min="500" max="50000" step="500"
-                      value={sv.cap || 3000}
-                      onChange={e => handleCapChange(sv.id, parseInt(e.target.value, 10))}
-                    />
-                    <span className="sv-cap-value">{(sv.cap || 3000).toLocaleString()}</span>
-                  </div>
                 </div>
               )}
             </div>
@@ -146,7 +125,21 @@ export default function SnapviewHistory() {
         })}
       </div>
 
-      {/* ── Global analysis panel — appears when any snapview has live data ── */}
+      {/* ── Global cap slider ── */}
+      {hasLiveData && (
+        <div className="sv-cap-row">
+          <span className="sv-cap-label">Cap</span>
+          <input
+            type="range" className="sv-cap-slider"
+            min="500" max="50000" step="500"
+            value={viewportCap}
+            onChange={e => handleCapChange(parseInt(e.target.value, 10))}
+          />
+          <span className="sv-cap-value">{viewportCap.toLocaleString()}</span>
+        </div>
+      )}
+
+      {/* ── Analysis panel ── */}
       <AnalysisPanel />
     </div>
   );
