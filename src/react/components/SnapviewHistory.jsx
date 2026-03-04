@@ -1,7 +1,8 @@
 import { useState, useMemo, useRef, useCallback } from 'react';
 import { useStore, updateSnapviewCap } from '../../lib/store.js';
-import { restoreSnapview, deleteSnapview, toggleSnapviewTheme, setHighlightIntersections, onSnapviewCapChange, refreshViewport } from '../../lib/controller.js';
+import { restoreSnapview, deleteSnapview, toggleSnapviewTheme, onSnapviewCapChange, refreshViewport } from '../../lib/controller.js';
 import { getThemeColor } from '../../lib/themes.js';
+import SqlQueryPanel from './SqlQueryPanel.jsx';
 
 function formatTs(ms) {
   const d = new Date(ms);
@@ -46,6 +47,7 @@ function statsText(sv) {
 
 export default function SnapviewHistory() {
   const [expandedId, setExpandedId] = useState(null);
+  const [queryOpenId, setQueryOpenId] = useState(null);
   const snapviews = useStore(s => s.snapviews);
   const sortedSnapviews = useMemo(
     () => [...snapviews].sort((a, b) => b.ts - a.ts),
@@ -53,7 +55,6 @@ export default function SnapviewHistory() {
   );
   const activeSnapview = useStore(s => s.activeSnapview);
   const themeUi = useStore(s => s.themeUi);
-  const highlightIntersections = useStore(s => s.highlightIntersections);
 
   function handleDelete(e, svId) {
     e.stopPropagation();
@@ -74,11 +75,6 @@ export default function SnapviewHistory() {
   function handleRestore(e, sv) {
     e.stopPropagation();
     restoreSnapview(sv);
-  }
-
-  function handleIntersections(e) {
-    e.stopPropagation();
-    setHighlightIntersections(!highlightIntersections);
   }
 
   function themeRowCount(sv, key) {
@@ -106,8 +102,10 @@ export default function SnapviewHistory() {
 
   if (sortedSnapviews.length === 0) return null;
 
+  const hasQuery = queryOpenId !== null;
+
   return (
-    <div className="snapview-panel">
+    <div className={`snapview-panel${hasQuery ? ' snapview-panel-wide' : ''}`}>
       <div className="snapview-panel-header">
         <span className="snapview-panel-title">Snapviews</span>
         <span className="snapview-badge">{sortedSnapviews.length}</span>
@@ -115,6 +113,7 @@ export default function SnapviewHistory() {
       <div className="snapview-list">
         {sortedSnapviews.map(sv => {
           const isExpanded = expandedId === sv.id;
+          const isQueryOpen = queryOpenId === sv.id;
           const itemClasses = [
             'snapview-item',
             activeSnapview === sv.id ? 'active' : '',
@@ -219,12 +218,15 @@ export default function SnapviewHistory() {
                       Restore viewport
                     </button>
                     <button
-                      className={`snapview-action-btn ${highlightIntersections ? 'active-toggle' : ''}`}
-                      onClick={handleIntersections}
+                      className={`snapview-action-btn ${isQueryOpen ? 'active-toggle' : ''}`}
+                      onClick={(e) => { e.stopPropagation(); setQueryOpenId(isQueryOpen ? null : sv.id); }}
                     >
-                      {highlightIntersections ? 'Hide' : 'Show'} intersections
+                      Query
                     </button>
                   </div>
+                  {isQueryOpen && (
+                    <SqlQueryPanel sv={sv} onClose={() => setQueryOpenId(null)} />
+                  )}
                 </div>
               )}
             </div>

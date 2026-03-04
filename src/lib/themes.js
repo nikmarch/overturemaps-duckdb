@@ -2,7 +2,7 @@ import L from 'leaflet';
 import { PROXY, PALETTE_16, THEME_COLORS, DEFAULT_COLOR } from './constants.js';
 import { getConn } from './duckdb.js';
 import { getMap, getBbox, bboxContains } from './map.js';
-import { bboxFilter, getFieldsForTable } from './query.js';
+import { bboxFilter, buildCacheSelect, getFieldsForTable } from './query.js';
 import { renderFeature } from './render.js';
 import { darkenHex } from './render.js';
 import { isIntersectionMode, recomputeIntersections } from './intersections.js';
@@ -235,6 +235,13 @@ export async function loadTheme(key, snapviewId) {
         let fields = null;
         const renderLimit = getRenderLimit(svCap);
 
+        // Peek parquet schema once to build a minimal, stable SELECT
+        const schemaRes = await conn.query(
+          `DESCRIBE SELECT * FROM read_parquet(['${files[0]}'], hive_partitioning=false) LIMIT 0`
+        );
+        const parquetCols = new Set(schemaRes.toArray().map(r => r.column_name));
+        const cacheSelect = buildCacheSelect(parquetCols, key);
+
         for (let i = 0; i < files.length && totalLoaded < limit; i += batchSize) {
           const batch = files.slice(i, i + batchSize);
           const remaining = limit - totalLoaded;
@@ -245,10 +252,7 @@ export async function loadTheme(key, snapviewId) {
           if (i === 0) {
             await conn.query(`
               CREATE TABLE "${tableName}" AS
-              SELECT *, ST_GeometryType(geometry) as geom_type,
-                     ST_AsGeoJSON(geometry) as geojson,
-                     ST_X(ST_Centroid(geometry)) as centroid_lon,
-                     ST_Y(ST_Centroid(geometry)) as centroid_lat
+              SELECT ${cacheSelect}
               FROM read_parquet([${fileList}], hive_partitioning=false)
               WHERE ${bboxFilter(bbox)}
               LIMIT ${remaining}
@@ -257,10 +261,7 @@ export async function loadTheme(key, snapviewId) {
           } else {
             await conn.query(`
               INSERT INTO "${tableName}"
-              SELECT *, ST_GeometryType(geometry) as geom_type,
-                     ST_AsGeoJSON(geometry) as geojson,
-                     ST_X(ST_Centroid(geometry)) as centroid_lon,
-                     ST_Y(ST_Centroid(geometry)) as centroid_lat
+              SELECT ${cacheSelect}
               FROM read_parquet([${fileList}], hive_partitioning=false)
               WHERE ${bboxFilter(bbox)}
               LIMIT ${remaining}
