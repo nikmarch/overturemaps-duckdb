@@ -20,7 +20,9 @@ import {
   updateSnapviewTheme,
   checkSnapviewComplete,
   updateSnapviewCap,
+  hydrateSnapviewMeta,
 } from './store.js';
+import { saveSnapviewMeta, loadAllSnapviewMeta, deleteSnapviewMeta } from './snapviewDb.js';
 
 export { onReleaseChange as setRelease };
 export { toggleTheme };
@@ -84,13 +86,14 @@ export function deleteSnapview(snapviewId) {
   }
 
   deleteSnapviewFromStore(snapviewId);
+  deleteSnapviewMeta(snapviewId);
   updateStats();
 }
 
-export function loadArea(keys) {
-  const bbox = getBbox();
+export function loadArea(keys, bbox) {
+  const b = bbox || getBbox();
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
-  createSnapview(id, bbox, keys);
+  createSnapview(id, b, keys);
   activeSnapviewId = id;
   useStore.setState({ activeSnapview: id });
 
@@ -101,14 +104,37 @@ export function loadArea(keys) {
   }
 }
 
-// Watch for snapview completion to unlock the map
+// Watch for snapview completion: unlock map + persist metadata
 useStore.subscribe(
   s => s.snapviews,
   (snapviews) => {
     const anyLoading = snapviews.some(sv => sv.status === 'loading');
     if (!anyLoading) unlockMap();
+
+    for (const sv of snapviews) {
+      if (sv.status === 'done' && sv.hasData) {
+        saveSnapviewMeta(sv);
+      }
+    }
   },
 );
+
+export async function initSnapviewHistory() {
+  const metas = await loadAllSnapviewMeta();
+  if (metas.length > 0) hydrateSnapviewMeta(metas);
+}
+
+export async function reloadFromMeta(sv) {
+  const map = getMap();
+  const { bbox, keys } = sv;
+  // Remove the metadata-only entry
+  deleteSnapviewFromStore(sv.id);
+  await deleteSnapviewMeta(sv.id);
+  // Navigate to saved bbox and load fresh data
+  map.fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [0, 0] });
+  await new Promise(r => setTimeout(r, 150));
+  loadArea(keys, bbox);
+}
 
 export function onMapMove() {
   useStore.setState(s => ({

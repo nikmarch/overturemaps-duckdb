@@ -34,6 +34,7 @@ export function createSnapview(id, bbox, keys) {
     bbox,
     keys: [...keys],
     status: 'loading',
+    hasData: true,
     progress: { loaded: 0, total: keys.length, currentKey: null },
     themeStats: {},
     ts: Date.now(),
@@ -134,6 +135,22 @@ export function updateSnapviewCap(snapviewId, cap) {
       sv.id === snapviewId ? { ...sv, cap } : sv
     ),
   }));
+}
+
+export function hydrateSnapviewMeta(metaList) {
+  const svs = metaList.map(meta => ({
+    ...meta,
+    status: 'done',
+    hasData: false,
+    progress: { loaded: meta.keys.length, total: meta.keys.length, currentKey: null },
+    themeStats: {},
+    error: null,
+  }));
+  useStore.setState(s => {
+    const existingIds = new Set(s.snapviews.map(sv => sv.id));
+    const newSvs = svs.filter(sv => !existingIds.has(sv.id));
+    return { snapviews: [...s.snapviews, ...newSvs].slice(0, 50) };
+  });
 }
 
 // --- Selectors (replace Svelte derived stores) ---

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import SnapviewHistory from './components/SnapviewHistory';
 import LoadModal from './components/LoadModal';
 import StatusBar from './components/StatusBar';
-import { loadArea } from '../lib/controller.js';
+import { loadArea, initSnapviewHistory } from '../lib/controller.js';
 import { initMap } from '../lib/map.js';
 import { initDuckDB } from '../lib/duckdb.js';
 import { loadReleases } from '../lib/themes.js';
@@ -27,6 +27,7 @@ export default function App() {
         setTimeout(onMapMove, 0);
 
         await loadReleases();
+        await initSnapviewHistory();
         setInitialized(true);
       } catch (e) {
         useStore.setState({ status: { text: `Init error: ${e.message}`, type: 'error' } });

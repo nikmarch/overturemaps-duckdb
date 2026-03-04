@@ -6,7 +6,6 @@ import { bboxFilter, buildCacheSelect, getFieldsForTable } from './query.js';
 import { renderFeature } from './render.js';
 import { darkenHex } from './render.js';
 import { isIntersectionMode, recomputeIntersections } from './intersections.js';
-import { setSnapviewRelease } from './snapviews.js';
 import {
   useStore,
   updateSnapviewTheme,
@@ -433,6 +432,16 @@ export async function enableThemeFromCache(key, snapviewBbox, snapviewCap) {
   updateStats();
 }
 
+export function setThemeLayersVisible(visible) {
+  const map = getMap();
+  if (!map) return;
+  for (const state of Object.values(themeState)) {
+    if (!state?.layer) continue;
+    if (visible) state.layer.addTo(map);
+    else state.layer.remove();
+  }
+}
+
 export function disableTheme(key) {
   const state = themeState[key];
   if (!state || !state.enabled) return;
@@ -498,7 +507,6 @@ export async function onReleaseChange(release) {
   const map = getMap();
   currentRelease = release;
   useStore.setState({ selectedRelease: release });
-  setSnapviewRelease(release);
 
   for (const key of Object.keys(themeState)) {
     themeState[key].layer.clearLayers();
