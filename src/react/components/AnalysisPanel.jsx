@@ -24,14 +24,20 @@ function tableToKey(tableName) {
   return tableName.replace('_', '/');
 }
 
-function buildQuery(mode, tableA, tableB, distance, limit = 2000) {
+function buildQuery(mode, tableA, tableB, distance, limit = 2000, tables = []) {
   const cols    = `a.id, a.display_name, a.geom_type, ST_AsGeoJSON(a.geometry) as geojson, a.centroid_lon, a.centroid_lat`;
   const distDeg = (distance / 111320).toFixed(6);
   const preFlt  = `ABS(a.centroid_lon - b.centroid_lon) < 0.2\n  AND ABS(a.centroid_lat - b.centroid_lat) < 0.2`;
 
   switch (mode) {
-    case 'show':
-      return `SELECT * EXCLUDE (geometry),\n  ST_AsGeoJSON(geometry) AS geojson\nFROM "${tableA}"\nLIMIT ${limit}`;
+    case 'show': {
+      const showTables = tables.length > 0 ? tables : (tableA ? [{ table: tableA, key: tableToKey(tableA) }] : []);
+      if (showTables.length === 0) return '';
+      const unions = showTables.map(t =>
+        `SELECT id, display_name, geom_type, ST_AsGeoJSON(geometry) AS geojson,\n  centroid_lon, centroid_lat, '${t.key}' AS _source\nFROM "${t.table}"`
+      );
+      return unions.join('\nUNION ALL\n') + `\nLIMIT ${limit}`;
+    }
     case 'intersect':
       return `SELECT ${cols}\nFROM "${tableA}" a\nJOIN "${tableB}" b\n  ON ${preFlt}\n  AND ST_Intersects(a.geometry, b.geometry)\nLIMIT ${limit}`;
     case 'within':
@@ -169,9 +175,14 @@ export default function AnalysisPanel() {
 
   // Regenerate SQL whenever controls change
   useEffect(() => {
-    if (!tableA) return;
-    setSql(buildQuery(mode, tableA, tableB, distance, viewportCap));
-  }, [mode, tableA, tableB, distance, viewportCap]);
+    if (mode === 'show') {
+      if (tables.length === 0) return;
+      setSql(buildQuery('show', '', '', 0, viewportCap, tables));
+    } else {
+      if (!tableA) return;
+      setSql(buildQuery(mode, tableA, tableB, distance, viewportCap));
+    }
+  }, [mode, tableA, tableB, distance, viewportCap, tables]);
 
   useEffect(() => () => {
     if (layerRef.current) { layerRef.current.remove(); layerRef.current = null; }
@@ -199,9 +210,17 @@ export default function AnalysisPanel() {
       const keyA = tableToKey(tableA);
 
       if (mode === 'show') {
-        // Use theme color for show mode
-        const color = (getThemeColor(keyA) || {}).fill || COLOR_A;
-        const count = renderRows(rows, layer, color, keyA, 5);
+        // Group rows by _source and color each by its theme color
+        let count = 0;
+        const bySource = {};
+        for (const row of rows) {
+          const src = row._source || '';
+          (bySource[src] ||= []).push(row);
+        }
+        for (const [src, srcRows] of Object.entries(bySource)) {
+          const color = (getThemeColor(src) || {}).fill || COLOR_A;
+          count += renderRows(srcRows, layer, color, src, 5);
+        }
         setResult({ count, total: rows.length });
       } else {
         // Table A results (orange)
@@ -265,9 +284,11 @@ export default function AnalysisPanel() {
 
       <div className="analysis-form">
         <div className="analysis-row">
-          <select className="analysis-select" value={tableA} onChange={e => setTableA(e.target.value)}>
-            {tables.map(t => <option key={t.table} value={t.table}>{t.label}</option>)}
-          </select>
+          {needsB && (
+            <select className="analysis-select" value={tableA} onChange={e => setTableA(e.target.value)}>
+              {tables.map(t => <option key={t.table} value={t.table}>{t.label}</option>)}
+            </select>
+          )}
           {needsB && (
             <>
               <span className="analysis-connector">
@@ -282,7 +303,7 @@ export default function AnalysisPanel() {
             <div className="analysis-distance">
               <input
                 type="number" className="analysis-dist-input"
-                value={distance} min={1} step={50}
+                value={distance} min={1} step={5}
                 onChange={e => setDistance(Number(e.target.value))}
               />
               <span className="analysis-dist-unit">m</span>

@@ -22,7 +22,8 @@ import {
   updateSnapviewCap,
   hydrateSnapviewMeta,
 } from './store.js';
-import { saveSnapviewMeta, loadAllSnapviewMeta, deleteSnapviewMeta } from './snapviewDb.js';
+import { saveSnapviewMeta, loadAllSnapviewMeta, deleteSnapviewMeta, loadTableCache, clearAllTableCache } from './snapviewDb.js';
+import { getConn, getDb } from './duckdb.js';
 
 export { onReleaseChange as setRelease };
 export { toggleTheme };
@@ -122,17 +123,95 @@ useStore.subscribe(
 export async function initSnapviewHistory() {
   const metas = await loadAllSnapviewMeta();
   if (metas.length > 0) hydrateSnapviewMeta(metas);
+
+  // Try to restore table data from IndexedDB cache
+  const conn = getConn();
+  const db = getDb();
+  if (!conn || !db) return;
+
+  let restored = 0;
+  for (const sv of metas) {
+    for (const key of sv.keys) {
+      const tableName = key.replace('/', '_');
+      try {
+        const cached = await loadTableCache(tableName);
+        if (!cached) continue;
+        await db.registerFileBuffer(`${tableName}.parquet`, cached.parquetBuffer);
+        await conn.query(`CREATE TABLE IF NOT EXISTS "${tableName}" AS SELECT * FROM read_parquet('${tableName}.parquet')`);
+        try {
+          await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
+        } catch { /* RTREE may not be available */ }
+        if (themeState[key]) {
+          themeState[key].bbox = cached.bbox;
+        }
+        restored++;
+      } catch (e) {
+        console.warn(`IDB restore ${tableName}:`, e);
+      }
+    }
+  }
+  if (restored > 0) {
+    useStore.setState({ status: { text: `Restored ${restored} table${restored > 1 ? 's' : ''} from cache`, type: 'success' } });
+  }
 }
 
 export async function reloadFromMeta(sv) {
   const map = getMap();
+  const conn = getConn();
+  const db = getDb();
   const { bbox, keys } = sv;
-  // Remove the metadata-only entry
-  deleteSnapviewFromStore(sv.id);
-  await deleteSnapviewMeta(sv.id);
-  // Navigate to saved bbox and load fresh data
+
+  // Navigate to saved bbox
   map.fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [0, 0] });
   await new Promise(r => setTimeout(r, 150));
+
+  // Check if all tables are cached in IndexedDB
+  if (conn && db) {
+    const cachedKeys = [];
+    for (const key of keys) {
+      const tableName = key.replace('/', '_');
+      try {
+        const cached = await loadTableCache(tableName);
+        if (cached) {
+          // Check if table already exists in DuckDB (may have been restored at init)
+          const existing = (await conn.query('SHOW TABLES')).toArray().map(t => t.name);
+          if (!existing.includes(tableName)) {
+            await db.registerFileBuffer(`${tableName}.parquet`, cached.parquetBuffer);
+            await conn.query(`CREATE TABLE "${tableName}" AS SELECT * FROM read_parquet('${tableName}.parquet')`);
+            try {
+              await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
+            } catch { /* RTREE may not be available */ }
+          }
+          if (themeState[key]) themeState[key].bbox = cached.bbox;
+          cachedKeys.push(key);
+        }
+      } catch (e) {
+        console.warn(`IDB restore ${tableName}:`, e);
+      }
+    }
+
+    if (cachedKeys.length === keys.length) {
+      // All cached — enable from DuckDB cache, no API needed
+      // Remove metadata-only entry and create a proper snapview
+      deleteSnapviewFromStore(sv.id);
+      await deleteSnapviewMeta(sv.id);
+      const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
+      createSnapview(id, bbox, keys);
+      activeSnapviewId = id;
+      useStore.setState({ activeSnapview: id });
+      for (const key of keys) {
+        await enableThemeFromCache(key, bbox, sv.cap);
+        updateSnapviewTheme(id, key, { status: 'done', rowCount: themeState[key]?.markers.length || 0 });
+      }
+      checkSnapviewComplete(id);
+      useStore.setState({ status: { text: `Restored ${keys.length} table${keys.length > 1 ? 's' : ''} from cache`, type: 'success' } });
+      return;
+    }
+  }
+
+  // Fall through to fresh API load
+  deleteSnapviewFromStore(sv.id);
+  await deleteSnapviewMeta(sv.id);
   loadArea(keys, bbox);
 }
 
@@ -239,6 +318,7 @@ export async function clearCache() {
   clearSnapviews();
   clearIntersectionState();
   await dropAllTables();
+  await clearAllTableCache();
   clearAllThemes();
 
   const requests = Object.keys(themeState).map((key) => {
