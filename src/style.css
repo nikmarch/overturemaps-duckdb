@@ -438,11 +438,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 }
 .sv-card.loading {
   border-color: #ffc107;
-  background: #fffdf0;
 }
 .sv-card.error {
   border-color: #e74c3c;
-  background: #fdf2f2;
 }
 
 /* Header row */

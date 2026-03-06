@@ -110,6 +110,12 @@ export function deleteSnapview(snapviewId) {
 }
 
 export function loadArea(keys, bbox) {
+  // Only one snapview at a time — drop existing ones
+  const existing = useStore.getState().snapviews;
+  for (const sv of existing) {
+    deleteSnapview(sv.id);
+  }
+
   const b = bbox || getBbox();
   const id = makeId();
   createSnapview(id, b, keys);
