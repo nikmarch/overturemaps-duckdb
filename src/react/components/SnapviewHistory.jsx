@@ -1,8 +1,10 @@
-import { useRef, useCallback, useMemo } from 'react';
+import { useState, useRef, useCallback, useMemo } from 'react';
 import { useStore } from '../../lib/store.js';
 import { deleteSnapview, reloadFromMeta } from '../../lib/controller.js';
 import { getThemeColor, rerenderAllEnabled } from '../../lib/themes.js';
+import { getMap } from '../../lib/map.js';
 import AnalysisPanel from './AnalysisPanel.jsx';
+import SnapviewTableView from './SnapviewTableView.jsx';
 
 function formatTs(ms) {
   const d = new Date(ms);
@@ -28,6 +30,10 @@ export default function SnapviewHistory() {
   const viewportCap = useStore(s => s.viewportCap);
   const themeUi = useStore(s => s.themeUi);
 
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [expandedId, setExpandedId] = useState(null);
+  const [tableViewSv, setTableViewSv] = useState(null);
+
   const sortedSnapviews = useMemo(
     () => [...snapviews].sort((a, b) => b.ts - a.ts),
     [snapviews],
@@ -44,103 +50,155 @@ export default function SnapviewHistory() {
 
   if (sortedSnapviews.length === 0) return null;
 
+  function toggleCard(sv) {
+    const opening = expandedId !== sv.id;
+    setExpandedId(prev => prev === sv.id ? null : sv.id);
+    if (opening && sv.bbox) {
+      const map = getMap();
+      if (map) {
+        map.fitBounds(
+          [[sv.bbox.ymin, sv.bbox.xmin], [sv.bbox.ymax, sv.bbox.xmax]],
+          { padding: [20, 20], animate: true },
+        );
+      }
+    }
+  }
+
   return (
-    <div className="snapview-panel">
-      <div className="snapview-list">
-        {sortedSnapviews.map(sv => {
-          const isDone = sv.status === 'done';
-          const hasData = sv.hasData !== false;
+    <>
+      <div className={`snapview-panel${panelOpen ? '' : ' collapsed'}`}>
+        {/* Panel header */}
+        <div className="sv-panel-header" onClick={() => setPanelOpen(o => !o)}>
+          <span className="sv-panel-toggle">{panelOpen ? '▼' : '▶'}</span>
+          <span className="sv-panel-title">Snapviews</span>
+          <span className="sv-panel-count">{sortedSnapviews.length}</span>
+        </div>
 
-          return (
-            <div key={sv.id} className={`sv-card ${sv.status}`}>
+        {panelOpen && (
+          <>
+            <div className="snapview-list">
+              {sortedSnapviews.map(sv => {
+                const isDone = sv.status === 'done';
+                const hasData = sv.hasData !== false;
+                const isExpanded = expandedId === sv.id;
 
-              {/* ── Header row ── */}
-              <div
-                className={`sv-card-row${!hasData ? ' clickable' : ''}`}
-                role={!hasData ? 'button' : undefined}
-                tabIndex={!hasData ? 0 : undefined}
-                onClick={!hasData ? () => reloadFromMeta(sv) : undefined}
-                onKeyDown={!hasData ? (e => e.key === 'Enter' && reloadFromMeta(sv)) : undefined}
-                title={!hasData ? 'Click to reload this area' : undefined}
-              >
-                <div className="sv-card-dots">
-                  {sv.keys.slice(0, 4).map(key => (
-                    <span
-                      key={key}
-                      className={`sv-dot${sv.status === 'loading' ? ' pulse' : ''}`}
-                      style={{ background: getThemeColor(key)?.fill || '#999' }}
-                    />
-                  ))}
-                </div>
+                return (
+                  <div key={sv.id} className={`sv-card ${sv.status}${isExpanded ? ' expanded' : ''}`}>
 
-                <div className="sv-card-info">
-                  <span className="sv-card-keys">{shortKeys(sv.keys)}</span>
+                    {/* Header row — always visible, click to expand/collapse */}
+                    <div
+                      className={`sv-card-row${!hasData && !isDone ? '' : ''}`}
+                      onClick={() => {
+                        if (!hasData && isDone) {
+                          reloadFromMeta(sv);
+                        } else {
+                          toggleCard(sv);
+                        }
+                      }}
+                    >
+                      {isDone && hasData && (
+                        <span className="sv-card-chevron">{isExpanded ? '▼' : '▶'}</span>
+                      )}
 
-                  {sv.status === 'loading' && (
-                    <div className="sv-card-progress">
-                      <div className="sv-card-progress-fill" style={{ width: `${progressPct(sv)}%` }} />
-                      <span className="sv-card-progress-text">{sv.progress.loaded}/{sv.progress.total}</span>
+                      <div className="sv-card-dots">
+                        {sv.keys.slice(0, 4).map(key => (
+                          <span
+                            key={key}
+                            className={`sv-dot${sv.status === 'loading' ? ' pulse' : ''}`}
+                            style={{ background: getThemeColor(key)?.fill || '#999' }}
+                          />
+                        ))}
+                      </div>
+
+                      <div className="sv-card-info">
+                        <span className="sv-card-keys">{shortKeys(sv.keys)}</span>
+
+                        {sv.status === 'loading' && (
+                          <div className="sv-card-progress">
+                            <div className="sv-card-progress-fill" style={{ width: `${progressPct(sv)}%` }} />
+                            <span className="sv-card-progress-text">{sv.progress.loaded}/{sv.progress.total}</span>
+                          </div>
+                        )}
+                        {sv.status === 'error' && (
+                          <span className="sv-card-sub error">{sv.error || 'error'}</span>
+                        )}
+                        {isDone && !isExpanded && (
+                          <span className="sv-card-sub">
+                            {sv.totalRows != null && `${sv.totalRows.toLocaleString()} · `}
+                            {formatDuration(sv.totalTimeMs)}
+                            {sv.totalTimeMs ? ' · ' : ''}
+                            {formatTs(sv.ts)}
+                            {!hasData ? ' · saved' : ''}
+                          </span>
+                        )}
+                      </div>
+
+                      <button
+                        className="sv-card-delete"
+                        onClick={e => { e.stopPropagation(); deleteSnapview(sv.id); }}
+                      >&times;</button>
                     </div>
-                  )}
-                  {sv.status === 'error' && (
-                    <span className="sv-card-sub error">{sv.error || 'error'}</span>
-                  )}
-                  {isDone && (
-                    <span className="sv-card-sub">
-                      {sv.totalRows != null && `${sv.totalRows.toLocaleString()} · `}
-                      {formatDuration(sv.totalTimeMs)}
-                      {sv.totalTimeMs ? ' · ' : ''}
-                      {formatTs(sv.ts)}
-                      {!hasData ? ' · saved' : ''}
-                    </span>
-                  )}
-                </div>
 
-                <button
-                  className="sv-card-delete"
-                  onClick={e => { e.stopPropagation(); deleteSnapview(sv.id); }}
-                >&times;</button>
-              </div>
+                    {/* Expanded content */}
+                    {isExpanded && isDone && hasData && (
+                      <>
+                        {/* Per-theme meta chips */}
+                        {sv.keys.length > 0 && (
+                          <div className="sv-card-meta">
+                            {sv.keys.map(key => {
+                              const color = getThemeColor(key);
+                              const live = themeUi[key]?.rowCount;
+                              const stored = sv.themeStats[key]?.rowCount;
+                              const count = live ?? stored;
+                              return (
+                                <span key={key} className="sv-meta-chip">
+                                  <span className="sv-meta-dot" style={{ background: color?.fill || '#999' }} />
+                                  {key.split('/')[1]}
+                                  {count != null && <span className="sv-meta-count">{count.toLocaleString()}</span>}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
 
-              {/* ── Per-theme meta chips (always visible) ── */}
-              {isDone && hasData && sv.keys.length > 0 && (
-                <div className="sv-card-meta">
-                  {sv.keys.map(key => {
-                    const color = getThemeColor(key);
-                    const live = themeUi[key]?.rowCount;
-                    const stored = sv.themeStats[key]?.rowCount;
-                    const count = live ?? stored;
-                    return (
-                      <span key={key} className="sv-meta-chip">
-                        <span className="sv-meta-dot" style={{ background: color?.fill || '#999' }} />
-                        {key.split('/')[1]}
-                        {count != null && <span className="sv-meta-count">{count.toLocaleString()}</span>}
-                      </span>
-                    );
-                  })}
-                </div>
-              )}
+                        {/* Actions row */}
+                        <div className="sv-card-actions">
+                          <button
+                            className="sv-card-table-btn"
+                            onClick={e => { e.stopPropagation(); setTableViewSv(sv); }}
+                          >▤ Table</button>
+                        </div>
+
+                        {/* Analysis panel scoped to this snapview */}
+                        <AnalysisPanel />
+                      </>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-          );
-        })}
+
+            {/* Global cap slider */}
+            {hasLiveData && (
+              <div className="sv-cap-row">
+                <span className="sv-cap-label">Cap</span>
+                <input
+                  type="range" className="sv-cap-slider"
+                  min="500" max="50000" step="500"
+                  value={viewportCap}
+                  onChange={e => handleCapChange(parseInt(e.target.value, 10))}
+                />
+                <span className="sv-cap-value">{viewportCap.toLocaleString()}</span>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
-      {/* ── Global cap slider ── */}
-      {hasLiveData && (
-        <div className="sv-cap-row">
-          <span className="sv-cap-label">Cap</span>
-          <input
-            type="range" className="sv-cap-slider"
-            min="500" max="50000" step="500"
-            value={viewportCap}
-            onChange={e => handleCapChange(parseInt(e.target.value, 10))}
-          />
-          <span className="sv-cap-value">{viewportCap.toLocaleString()}</span>
-        </div>
+      {/* Table view overlay */}
+      {tableViewSv && (
+        <SnapviewTableView sv={tableViewSv} onClose={() => setTableViewSv(null)} />
       )}
-
-      {/* ── Analysis panel ── */}
-      <AnalysisPanel />
-    </div>
+    </>
   );
 }

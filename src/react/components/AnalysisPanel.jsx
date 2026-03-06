@@ -24,20 +24,20 @@ function tableToKey(tableName) {
   return tableName.replace('_', '/');
 }
 
-function buildQuery(mode, tableA, tableB, distance, limit = 2000, tables = []) {
+function buildShowQuery(tables, limit) {
+  if (tables.length === 0) return '';
+  const unions = tables.map(t =>
+    `SELECT id, display_name, geom_type, ST_AsGeoJSON(geometry) AS geojson,\n  centroid_lon, centroid_lat, '${t.key}' AS _source\nFROM "${t.table}"`
+  );
+  return unions.join('\nUNION ALL\n') + `\nLIMIT ${limit}`;
+}
+
+function buildQuery(mode, tableA, tableB, distance, limit = 2000) {
   const cols    = `a.id, a.display_name, a.geom_type, ST_AsGeoJSON(a.geometry) as geojson, a.centroid_lon, a.centroid_lat`;
   const distDeg = (distance / 111320).toFixed(6);
   const preFlt  = `ABS(a.centroid_lon - b.centroid_lon) < 0.2\n  AND ABS(a.centroid_lat - b.centroid_lat) < 0.2`;
 
   switch (mode) {
-    case 'show': {
-      const showTables = tables.length > 0 ? tables : (tableA ? [{ table: tableA, key: tableToKey(tableA) }] : []);
-      if (showTables.length === 0) return '';
-      const unions = showTables.map(t =>
-        `SELECT id, display_name, geom_type, ST_AsGeoJSON(geometry) AS geojson,\n  centroid_lon, centroid_lat, '${t.key}' AS _source\nFROM "${t.table}"`
-      );
-      return unions.join('\nUNION ALL\n') + `\nLIMIT ${limit}`;
-    }
     case 'intersect':
       return `SELECT ${cols}\nFROM "${tableA}" a\nJOIN "${tableB}" b\n  ON ${preFlt}\n  AND ST_Intersects(a.geometry, b.geometry)\nLIMIT ${limit}`;
     case 'within':
@@ -164,7 +164,10 @@ export default function AnalysisPanel() {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [elapsed, setElapsed] = useState(null);
   const layerRef = useRef(null);
+  const timerRef = useRef(null);
+  const startRef = useRef(null);
 
   // Seed tables on first load
   useEffect(() => {
@@ -176,16 +179,15 @@ export default function AnalysisPanel() {
   // Regenerate SQL whenever controls change
   useEffect(() => {
     if (mode === 'show') {
-      if (tables.length === 0) return;
-      setSql(buildQuery('show', '', '', 0, viewportCap, tables));
+      if (tables.length > 0) setSql(buildShowQuery(tables, viewportCap));
     } else {
-      if (!tableA) return;
-      setSql(buildQuery(mode, tableA, tableB, distance, viewportCap));
+      if (tableA) setSql(buildQuery(mode, tableA, tableB, distance, viewportCap));
     }
   }, [mode, tableA, tableB, distance, viewportCap, tables]);
 
   useEffect(() => () => {
     if (layerRef.current) { layerRef.current.remove(); layerRef.current = null; }
+    if (timerRef.current) clearInterval(timerRef.current);
     setThemeLayersVisible(true);
   }, []);
 
@@ -196,6 +198,11 @@ export default function AnalysisPanel() {
     setRunning(true);
     setError(null);
     setResult(null);
+    startRef.current = performance.now();
+    setElapsed(0);
+    timerRef.current = setInterval(() => {
+      setElapsed(Math.round(performance.now() - startRef.current));
+    }, 100);
 
     if (layerRef.current) { layerRef.current.remove(); layerRef.current = null; }
     setThemeLayersVisible(false);
@@ -207,10 +214,7 @@ export default function AnalysisPanel() {
       const res = await conn.query(sql);
       const rows = res.toArray();
 
-      const keyA = tableToKey(tableA);
-
       if (mode === 'show') {
-        // Group rows by _source and color each by its theme color
         let count = 0;
         const bySource = {};
         for (const row of rows) {
@@ -218,33 +222,33 @@ export default function AnalysisPanel() {
           (bySource[src] ||= []).push(row);
         }
         for (const [src, srcRows] of Object.entries(bySource)) {
-          const color = (getThemeColor(src) || {}).fill || COLOR_A;
-          count += renderRows(srcRows, layer, color, src, 5);
+          const c = (getThemeColor(src) || {}).fill || COLOR_A;
+          count += renderRows(srcRows, layer, c, src, 5);
         }
-        setResult({ count, total: rows.length });
+        setResult({ count, total: rows.length, durationMs: Math.round(performance.now() - startRef.current) });
       } else {
-        // Table A results (orange)
+        const keyA = tableToKey(tableA);
         const count = renderRows(rows, layer, COLOR_A, keyA, 5);
 
-        // Table B matched features (cyan)
         const bq = buildMatchedBQuery(mode, tableA, tableB, distance, viewportCap);
         if (bq && tableB !== tableA) {
           const bRes = await conn.query(bq);
           renderRows(bRes.toArray(), layer, COLOR_B, tableToKey(tableB), 4);
         }
 
-        // Intersect mode: draw ST_Intersection areas (purple)
         if (mode === 'intersect') {
           await renderIntersectionGeoms(conn, tableA, tableB, layer);
         }
 
-        setResult({ count, total: rows.length });
+        setResult({ count, total: rows.length, durationMs: Math.round(performance.now() - startRef.current) });
       }
     } catch (e) {
       setError(e.message || String(e));
+      setElapsed(Math.round(performance.now() - startRef.current));
       if (layerRef.current) { layerRef.current.remove(); layerRef.current = null; }
       setThemeLayersVisible(true);
     } finally {
+      clearInterval(timerRef.current);
       setRunning(false);
     }
   }
@@ -262,7 +266,7 @@ export default function AnalysisPanel() {
 
   if (tables.length === 0) return null;
 
-  const needsB = mode !== 'show';
+  const isSpatial = mode !== 'show';
   const needsDistance = mode === 'within' || mode === 'exclude';
 
   return (
@@ -284,13 +288,11 @@ export default function AnalysisPanel() {
 
       <div className="analysis-form">
         <div className="analysis-row">
-          {needsB && (
-            <select className="analysis-select" value={tableA} onChange={e => setTableA(e.target.value)}>
-              {tables.map(t => <option key={t.table} value={t.table}>{t.label}</option>)}
-            </select>
-          )}
-          {needsB && (
+          {isSpatial && (
             <>
+              <select className="analysis-select" value={tableA} onChange={e => setTableA(e.target.value)}>
+                {tables.map(t => <option key={t.table} value={t.table}>{t.label}</option>)}
+              </select>
               <span className="analysis-connector">
                 {mode === 'intersect' ? '∩' : mode === 'within' ? '⊂' : '∖'}
               </span>
@@ -332,12 +334,16 @@ export default function AnalysisPanel() {
         <button className="analysis-run" onClick={run} disabled={running}>
           {running ? '…' : '▶ Run'}
         </button>
-        <span className="analysis-hint">Ctrl+Enter</span>
+        {running && elapsed != null && (
+          <span className="analysis-elapsed">{(elapsed / 1000).toFixed(1)}s</span>
+        )}
+        {!running && <span className="analysis-hint">Ctrl+Enter</span>}
         {error && <span className="analysis-error" title={error}>Error</span>}
         {result && !error && (
           <span className="analysis-count">
             {result.count.toLocaleString()} results
             {result.total !== result.count ? ` / ${result.total.toLocaleString()} rows` : ''}
+            {' · '}{result.durationMs < 1000 ? `${result.durationMs}ms` : `${(result.durationMs / 1000).toFixed(1)}s`}
           </span>
         )}
       </div>

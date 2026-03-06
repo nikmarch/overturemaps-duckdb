@@ -29,11 +29,29 @@ export { onReleaseChange as setRelease };
 export { toggleTheme };
 export { setThemeLimit };
 
-// The currently active snapview id
 let activeSnapviewId = null;
 
-function bboxKey(bbox) {
-  return [bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax].map(n => n.toFixed(5)).join(',');
+function makeId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+async function importTableFromIdb(key) {
+  const conn = getConn();
+  const db = getDb();
+  const tableName = key.replace('/', '_');
+  const cached = await loadTableCache(tableName);
+  if (!cached) return false;
+
+  const existing = (await conn.query('SHOW TABLES')).toArray().map(t => t.name);
+  if (!existing.includes(tableName)) {
+    await db.registerFileBuffer(`${tableName}.parquet`, cached.parquetBuffer);
+    await conn.query(`CREATE TABLE "${tableName}" AS SELECT * FROM read_parquet('${tableName}.parquet')`);
+    try {
+      await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
+    } catch { /* RTREE may not be available */ }
+  }
+  if (themeState[key]) themeState[key].bbox = cached.bbox;
+  return true;
 }
 
 // Find an existing snapview whose bbox contains the current one and already has the key
@@ -65,7 +83,7 @@ function getOrCreateActiveSnapview(bbox, keys) {
   }
 
   // Create a new snapview
-  const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const id = makeId();
   createSnapview(id, bbox, keys);
   return id;
 }
@@ -93,7 +111,7 @@ export function deleteSnapview(snapviewId) {
 
 export function loadArea(keys, bbox) {
   const b = bbox || getBbox();
-  const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const id = makeId();
   createSnapview(id, b, keys);
   activeSnapviewId = id;
   useStore.setState({ activeSnapview: id });
@@ -123,30 +141,18 @@ useStore.subscribe(
 export async function initSnapviewHistory() {
   const metas = await loadAllSnapviewMeta();
   if (metas.length > 0) hydrateSnapviewMeta(metas);
-
-  // Try to restore table data from IndexedDB cache
-  const conn = getConn();
-  const db = getDb();
-  if (!conn || !db) return;
+  if (!getConn() || !getDb()) return;
 
   let restored = 0;
+  const seen = new Set();
   for (const sv of metas) {
     for (const key of sv.keys) {
-      const tableName = key.replace('/', '_');
+      if (seen.has(key)) continue;
+      seen.add(key);
       try {
-        const cached = await loadTableCache(tableName);
-        if (!cached) continue;
-        await db.registerFileBuffer(`${tableName}.parquet`, cached.parquetBuffer);
-        await conn.query(`CREATE TABLE IF NOT EXISTS "${tableName}" AS SELECT * FROM read_parquet('${tableName}.parquet')`);
-        try {
-          await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
-        } catch { /* RTREE may not be available */ }
-        if (themeState[key]) {
-          themeState[key].bbox = cached.bbox;
-        }
-        restored++;
+        if (await importTableFromIdb(key)) restored++;
       } catch (e) {
-        console.warn(`IDB restore ${tableName}:`, e);
+        console.warn(`IDB restore ${key}:`, e);
       }
     }
   }
@@ -156,46 +162,20 @@ export async function initSnapviewHistory() {
 }
 
 export async function reloadFromMeta(sv) {
-  const map = getMap();
-  const conn = getConn();
-  const db = getDb();
   const { bbox, keys } = sv;
 
-  // Navigate to saved bbox
-  map.fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [0, 0] });
+  getMap().fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [0, 0] });
   await new Promise(r => setTimeout(r, 150));
 
-  // Check if all tables are cached in IndexedDB
-  if (conn && db) {
-    const cachedKeys = [];
-    for (const key of keys) {
-      const tableName = key.replace('/', '_');
-      try {
-        const cached = await loadTableCache(tableName);
-        if (cached) {
-          // Check if table already exists in DuckDB (may have been restored at init)
-          const existing = (await conn.query('SHOW TABLES')).toArray().map(t => t.name);
-          if (!existing.includes(tableName)) {
-            await db.registerFileBuffer(`${tableName}.parquet`, cached.parquetBuffer);
-            await conn.query(`CREATE TABLE "${tableName}" AS SELECT * FROM read_parquet('${tableName}.parquet')`);
-            try {
-              await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
-            } catch { /* RTREE may not be available */ }
-          }
-          if (themeState[key]) themeState[key].bbox = cached.bbox;
-          cachedKeys.push(key);
-        }
-      } catch (e) {
-        console.warn(`IDB restore ${tableName}:`, e);
-      }
-    }
-
-    if (cachedKeys.length === keys.length) {
-      // All cached — enable from DuckDB cache, no API needed
-      // Remove metadata-only entry and create a proper snapview
+  // Try IDB cache for all tables
+  if (getConn() && getDb()) {
+    const results = await Promise.all(keys.map(k =>
+      importTableFromIdb(k).catch(() => false)
+    ));
+    if (results.every(Boolean)) {
       deleteSnapviewFromStore(sv.id);
       await deleteSnapviewMeta(sv.id);
-      const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
+      const id = makeId();
       createSnapview(id, bbox, keys);
       activeSnapviewId = id;
       useStore.setState({ activeSnapview: id });
@@ -209,7 +189,6 @@ export async function reloadFromMeta(sv) {
     }
   }
 
-  // Fall through to fresh API load
   deleteSnapviewFromStore(sv.id);
   await deleteSnapviewMeta(sv.id);
   loadArea(keys, bbox);
