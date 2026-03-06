@@ -5,9 +5,10 @@ import { getConn } from '../../lib/duckdb.js';
 import { getMap } from '../../lib/map.js';
 import { getThemeColor, setThemeLayersVisible } from '../../lib/themes.js';
 import { THEME_FIELDS } from '../../lib/constants.js';
+import { renderFeature } from '../../lib/render.js';
 
-const COLOR_A   = '#f97316';
-const COLOR_B   = '#06b6d4';
+const COLOR_A   = { fill: '#f97316', stroke: '#c2410c' };
+const COLOR_B   = { fill: '#06b6d4', stroke: '#0e7490' };
 const IXN_COLOR = '#7c3aed';
 
 const MODES = [
@@ -17,23 +18,36 @@ const MODES = [
   { id: 'exclude',   label: 'Exclude'   },
 ];
 
-const B_COLS = `b.id, b.display_name, b.geom_type, ST_AsGeoJSON(b.geometry) as geojson, b.centroid_lon, b.centroid_lat`;
-
 // tableA is stored as "theme_type"; key is "theme/type" (first _ only)
 function tableToKey(tableName) {
   return tableName.replace('_', '/');
 }
 
+const BASE_COLS = ['id', 'display_name', 'geom_type', 'centroid_lon', 'centroid_lat'];
+
 function buildShowQuery(tables, limit) {
   if (tables.length === 0) return '';
-  const unions = tables.map(t =>
-    `SELECT id, display_name, geom_type, ST_AsGeoJSON(geometry) AS geojson,\n  centroid_lon, centroid_lat, '${t.key}' AS _source\nFROM "${t.table}"`
-  );
+
+  // Find max _f* index across all tables so UNION ALL columns align
+  const maxF = tables.reduce((mx, t) => {
+    const defs = THEME_FIELDS[t.key] || [];
+    return Math.max(mx, defs.length);
+  }, 0);
+
+  const unions = tables.map(t => {
+    const defs = THEME_FIELDS[t.key] || [];
+    const fCols = [];
+    for (let i = 0; i < maxF; i++) {
+      fCols.push(i < defs.length ? `_f${i}` : `NULL AS _f${i}`);
+    }
+    const cols = [...BASE_COLS, 'ST_AsGeoJSON(geometry) AS geojson', ...fCols, `'${t.key}' AS _source`];
+    return `SELECT ${cols.join(', ')}\nFROM "${t.table}"`;
+  });
   return unions.join('\nUNION ALL\n') + `\nLIMIT ${limit}`;
 }
 
 function buildQuery(mode, tableA, tableB, distance, limit = 2000) {
-  const cols    = `a.id, a.display_name, a.geom_type, ST_AsGeoJSON(a.geometry) as geojson, a.centroid_lon, a.centroid_lat`;
+  const cols    = `a.*, ST_AsGeoJSON(a.geometry) as geojson`;
   const distDeg = (distance / 111320).toFixed(6);
   const preFlt  = `ABS(a.centroid_lon - b.centroid_lon) < 0.2\n  AND ABS(a.centroid_lat - b.centroid_lat) < 0.2`;
 
@@ -50,63 +64,28 @@ function buildQuery(mode, tableA, tableB, distance, limit = 2000) {
 }
 
 function buildMatchedBQuery(mode, tableA, tableB, distance, limit = 2000) {
+  const bCols   = `b.*, ST_AsGeoJSON(b.geometry) as geojson`;
   const distDeg = (distance / 111320).toFixed(6);
   const preFlt  = `ABS(a.centroid_lon - b.centroid_lon) < 0.2\n  AND ABS(a.centroid_lat - b.centroid_lat) < 0.2`;
 
   switch (mode) {
     case 'intersect':
-      return `SELECT DISTINCT ${B_COLS}\nFROM "${tableA}" a\nJOIN "${tableB}" b\n  ON ${preFlt}\n  AND ST_Intersects(a.geometry, b.geometry)\nLIMIT ${limit}`;
+      return `SELECT DISTINCT ${bCols}\nFROM "${tableA}" a\nJOIN "${tableB}" b\n  ON ${preFlt}\n  AND ST_Intersects(a.geometry, b.geometry)\nLIMIT ${limit}`;
     case 'within':
-      return `SELECT DISTINCT ${B_COLS}\nFROM "${tableA}" a\nJOIN "${tableB}" b\n  ON ${preFlt}\n  AND ST_Distance(a.geometry, b.geometry) < ${distDeg}\nLIMIT ${limit}`;
+      return `SELECT DISTINCT ${bCols}\nFROM "${tableA}" a\nJOIN "${tableB}" b\n  ON ${preFlt}\n  AND ST_Distance(a.geometry, b.geometry) < ${distDeg}\nLIMIT ${limit}`;
     default:
       return null;
   }
 }
 
-function makePopup(row, keyHint = '') {
-  const name = row.display_name ? String(row.display_name) : '';
-  const id   = row.id           ? String(row.id)           : '';
+function renderRows(rows, layer, color, keyHint = '') {
   const defs = THEME_FIELDS[keyHint] || [];
-
-  const extras = [];
-  for (let i = 0; i < defs.length; i++) {
-    const val = row[`_f${i}`];
-    if (val != null && String(val) !== '') {
-      extras.push(`<tr><td style="color:#888;padding-right:8px;white-space:nowrap">${defs[i].label}</td>` +
-        `<td style="word-break:break-word">${val}</td></tr>`);
-    }
-  }
-
-  return `<div style="font:12px/1.5 sans-serif;max-width:260px">` +
-    `<b style="font-size:13px">${name || id}</b>` +
-    (extras.length ? `<table style="margin-top:4px;width:100%"><tbody>${extras.join('')}</tbody></table>` : '') +
-    (name && id ? `<br><small style="color:#bbb;word-break:break-all">${id}</small>` : '') +
-    `</div>`;
-}
-
-function renderRows(rows, layer, color, keyHint = '', pointRadius = 5) {
+  const state = { key: keyHint, layer, markers: [] };
   let count = 0;
   for (const row of rows) {
-    const popup = makePopup(row, keyHint);
     try {
-      const geojsonStr = row.geojson
-        ? (typeof row.geojson === 'string' ? row.geojson : String(row.geojson))
-        : null;
-      if (geojsonStr) {
-        L.geoJSON(JSON.parse(geojsonStr), {
-          style: { color, fillColor: color, weight: 2, fillOpacity: 0.4, opacity: 0.85 },
-          onEachFeature: (_f, l) => l.bindPopup(popup),
-          pointToLayer: (_f, ll) => L.circleMarker(ll, {
-            radius: pointRadius, fillColor: color, color: '#fff', weight: 1.5, fillOpacity: 0.9,
-          }).bindPopup(popup),
-        }).addTo(layer);
-        count++;
-      } else if (row.centroid_lon != null && row.centroid_lat != null) {
-        L.circleMarker([+row.centroid_lat, +row.centroid_lon], {
-          radius: pointRadius, fillColor: color, color: '#fff', weight: 1.5, fillOpacity: 0.9,
-        }).bindPopup(popup).addTo(layer);
-        count++;
-      }
+      renderFeature(row, state, color, defs);
+      count++;
     } catch { /* skip */ }
   }
   return count;
@@ -222,18 +201,18 @@ export default function AnalysisPanel() {
           (bySource[src] ||= []).push(row);
         }
         for (const [src, srcRows] of Object.entries(bySource)) {
-          const c = (getThemeColor(src) || {}).fill || COLOR_A;
-          count += renderRows(srcRows, layer, c, src, 5);
+          const c = getThemeColor(src) || COLOR_A;
+          count += renderRows(srcRows, layer, c, src);
         }
         setResult({ count, total: rows.length, durationMs: Math.round(performance.now() - startRef.current) });
       } else {
         const keyA = tableToKey(tableA);
-        const count = renderRows(rows, layer, COLOR_A, keyA, 5);
+        const count = renderRows(rows, layer, COLOR_A, keyA);
 
         const bq = buildMatchedBQuery(mode, tableA, tableB, distance, viewportCap);
         if (bq && tableB !== tableA) {
           const bRes = await conn.query(bq);
-          renderRows(bRes.toArray(), layer, COLOR_B, tableToKey(tableB), 4);
+          renderRows(bRes.toArray(), layer, COLOR_B, tableToKey(tableB));
         }
 
         if (mode === 'intersect') {
