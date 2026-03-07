@@ -24,6 +24,7 @@ import {
 } from './store.js';
 import { saveSnapviewMeta, loadAllSnapviewMeta, deleteSnapviewMeta, loadTableCache, clearAllTableCache } from './snapviewDb.js';
 import { getConn, getDb } from './duckdb.js';
+import { ensureFtsIndex } from './fts.js';
 
 export { onReleaseChange as setRelease };
 export { toggleTheme };
@@ -49,6 +50,8 @@ async function importTableFromIdb(key) {
     try {
       await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
     } catch { /* RTREE may not be available */ }
+
+    await ensureFtsIndex(conn, tableName);
   }
   if (themeState[key]) themeState[key].bbox = cached.bbox;
   return true;

@@ -13,6 +13,7 @@ import {
   failSnapview,
 } from './store.js';
 import { saveTableCache } from './snapviewDb.js';
+import { ensureFtsIndex } from './fts.js';
 
 export const themeState = {};
 export let currentRelease = null;
@@ -309,6 +310,10 @@ export async function loadTheme(key, snapviewId) {
       try {
         await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
       } catch { /* RTREE may not be available in this WASM build */ }
+
+      // Best-effort: build an FTS index on display_name for map search.
+      // This is safe to skip if the extension isn't available.
+      await ensureFtsIndex(conn, tableName);
 
       // Fire-and-forget: cache table to IndexedDB for cross-session restore
       cacheTableToIdb(tableName, { bbox, release: currentRelease }).catch(e => console.warn('IDB cache:', e));

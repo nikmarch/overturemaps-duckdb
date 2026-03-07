@@ -5,7 +5,7 @@ const VIEWPORT_CAP_KEY = 'overture_viewport_cap';
 const DEFAULT_VIEWPORT_CAP = 3000;
 const savedCap = parseInt(localStorage.getItem(VIEWPORT_CAP_KEY), 10);
 
-export const useStore = create(subscribeWithSelector((set, get) => ({
+export const useStore = create(subscribeWithSelector((_set, _get) => ({
   status: { text: 'Initializing...', type: 'loading' },
   releases: [],
   selectedRelease: null,
