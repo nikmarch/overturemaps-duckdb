@@ -16,8 +16,9 @@ export function buildNameFilterSql(tableName, q, { useFts = false } = {}) {
   const qq = escapeSqlString(query);
 
   if (useFts) {
-    // DuckDB FTS convention: fts_main_<table>.match('query')
-    return `fts_main_${tableName}.match('${qq}')`;
+    // DuckDB FTS convention: fts_main_<table>.match_bm25(id, 'query')
+    // (DuckDB suggests match_bm25 when match() isn't available)
+    return `fts_main_${tableName}.match_bm25(id, '${qq}')`;
   }
 
   return `display_name ILIKE '%${qq}%'`;
@@ -79,7 +80,7 @@ export async function ftsSearchTable(conn, tableName, q, limit = 10) {
         centroid_lat,
         '${escapeSqlString(tableName)}' AS source_table
       FROM "${tableName}"
-      WHERE fts_main_${tableName}.match('${qq}')
+      WHERE fts_main_${tableName}.match_bm25(id, '${qq}')
       LIMIT ${Number(limit) || 10}
     `)).toArray();
     return rows;
