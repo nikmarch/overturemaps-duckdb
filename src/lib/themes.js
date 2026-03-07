@@ -13,7 +13,7 @@ import {
   failSnapview,
 } from './store.js';
 import { saveTableCache } from './snapviewDb.js';
-import { ensureFtsIndex } from './fts.js';
+import { ensureFtsIndex, tableHasFts, buildNameFilterSql } from './fts.js';
 
 export const themeState = {};
 export let currentRelease = null;
@@ -21,6 +21,15 @@ const THEME_KEY_COLORS = {};
 
 function log(msg, type = 'loading') {
   useStore.setState({ status: { text: msg, type } });
+}
+
+async function globalSearchAnd(conn, tableName) {
+  const q = (useStore.getState().globalSearch || '').trim();
+  if (!q) return '';
+  const useFts = await tableHasFts(conn, tableName);
+  const clause = buildNameFilterSql(tableName, q, { useFts });
+  return clause ? `
+        AND ` : '';
 }
 
 export function getThemeColor(key) {
@@ -142,11 +151,12 @@ async function rerenderThemeFromCache(key, overrideCap) {
 
   try {
     const fields = await getFieldsForTable(conn, tableName, key);
+    const searchAnd = await globalSearchAnd(conn, tableName);
     const rows = (await conn.query(`
       SELECT ${fields.selectParts.join(', ')}
       FROM "${tableName}"
       WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
-        AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
+        AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}${searchAnd}
       LIMIT ${renderLimit}
     `)).toArray();
     await renderBatched(rows, state, color, fields.extraFields);
@@ -318,17 +328,24 @@ export async function loadTheme(key, snapviewId) {
       // Fire-and-forget: cache table to IndexedDB for cross-session restore
       cacheTableToIdb(tableName, { bbox, release: currentRelease }).catch(e => console.warn('IDB cache:', e));
 
+      // If a global search filter is active, rerender from the cached table so
+      // the map/table reflect the filter immediately.
+      if ((useStore.getState().globalSearch || '').trim()) {
+        await rerenderThemeFromCache(key, svCap);
+      }
+
       state.bbox = { ...bbox };
       state.loadedCount = state.markers.length;
     } else {
       log(`Querying cached ${type}...`);
       const renderLimit = getRenderLimit(svCap);
       const fields = await getFieldsForTable(conn, tableName, key);
+      const searchAnd = await globalSearchAnd(conn, tableName);
       const rows = (await conn.query(`
         SELECT ${fields.selectParts.join(', ')}
         FROM "${tableName}"
         WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
-          AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
+          AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}${searchAnd}
         LIMIT ${renderLimit}
       `)).toArray();
 
@@ -428,11 +445,12 @@ export async function enableThemeFromCache(key, snapviewBbox, snapviewCap) {
   try {
     const bbox = getBbox();
     const fields = await getFieldsForTable(conn, tableName, key);
+    const searchAnd = await globalSearchAnd(conn, tableName);
     const rows = (await conn.query(`
       SELECT ${fields.selectParts.join(', ')}
       FROM "${tableName}"
       WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
-        AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
+        AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}${searchAnd}
       LIMIT ${renderLimit}
     `)).toArray();
     await renderBatched(rows, state, color, fields.extraFields);
@@ -493,11 +511,12 @@ export async function rerenderAllEnabled(overrideCap) {
     try {
       const bbox = getBbox();
       const fields = await getFieldsForTable(conn, tableName, key);
+      const searchAnd = await globalSearchAnd(conn, tableName);
       const rows = (await conn.query(`
         SELECT ${fields.selectParts.join(', ')}
         FROM "${tableName}"
         WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
-          AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
+          AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}${searchAnd}
         LIMIT ${renderLimit}
       `)).toArray();
       await renderBatched(rows, state, color, fields.extraFields);
