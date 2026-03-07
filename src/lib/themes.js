@@ -26,10 +26,13 @@ function log(msg, type = 'loading') {
 async function globalSearchAnd(conn, tableName) {
   const q = (useStore.getState().globalSearch || '').trim();
   if (!q) return '';
+
   const useFts = await tableHasFts(conn, tableName);
   const clause = buildNameFilterSql(tableName, q, { useFts });
-  return clause ? `
-        AND ` : '';
+  if (!clause) return '';
+
+  // Returned string is appended directly inside an existing WHERE clause.
+  return ` AND (${clause})`;
 }
 
 export function getThemeColor(key) {
