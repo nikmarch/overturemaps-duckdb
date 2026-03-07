@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import SnapviewHistory from './components/SnapviewHistory';
 import LoadModal from './components/LoadModal';
 import StatusBar from './components/StatusBar';
+import MapSearch from './components/MapSearch';
 import { loadArea, initSnapviewHistory } from '../lib/controller.js';
 import { initMap } from '../lib/map.js';
 import { initDuckDB } from '../lib/duckdb.js';
@@ -45,6 +46,7 @@ export default function App() {
     <>
       <div id="map" />
       <StatusBar />
+      <MapSearch />
       <button
         className="load-area-btn"
         onClick={() => setModalOpen(true)}
