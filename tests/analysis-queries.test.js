@@ -20,13 +20,12 @@ describe('buildShowQuery', () => {
 
   it('aligns columns with NULL padding for mismatched _f counts', () => {
     const tables = [
-      { key: 'places/place', table: 'places_place' },           // 4 THEME_FIELDS
-      { key: 'buildings/building_part', table: 'buildings_building_part' }, // 2 THEME_FIELDS
+      { key: 'places/place', table: 'places_place' },           // 6 THEME_FIELDS
+      { key: 'buildings/building_part', table: 'buildings_building_part' }, // 5 THEME_FIELDS
     ];
     const sql = buildShowQuery(tables, 100);
-    // building_part has only 2 fields, so _f2 and _f3 should be NULL-padded
-    expect(sql).toContain('NULL AS _f2');
-    expect(sql).toContain('NULL AS _f3');
+    // building_part has 5 fields vs places' 6, so _f5 should be NULL-padded
+    expect(sql).toContain('NULL AS _f5');
   });
 
   it('includes _source column', () => {
