@@ -17,6 +17,7 @@ export const useStore = create(subscribeWithSelector((_set, _get) => ({
   viewportStats: { shownText: '-', enabledCount: 0, totalThemes: 0, viewportText: '-', totalRendered: 0 },
   snapviews: [],
   activeSnapview: null,
+  globalSearch: "",
 })));
 
 // Persist viewportCap to localStorage

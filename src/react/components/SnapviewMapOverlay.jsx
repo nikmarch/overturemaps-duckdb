@@ -3,6 +3,8 @@ import L from 'leaflet';
 import { getConn } from '../../lib/duckdb.js';
 import { getFieldsForTable } from '../../lib/query.js';
 import { getThemeColor } from '../../lib/themes.js';
+import { useStore } from '../../lib/store.js';
+import { buildNameFilterSql, tableHasFts } from '../../lib/fts.js';
 
 function tableNameForKey(key) {
   return key.replace('/', '_');
@@ -51,6 +53,7 @@ export default function SnapviewMapOverlay({ sv, onClose }) {
   const [loading, setLoading] = useState(true);
   const [count, setCount] = useState(0);
   const [error, setError] = useState(null);
+  const globalSearch = useStore(s => s.globalSearch);
 
   useEffect(() => {
     if (!mapDivRef.current) return;
@@ -75,8 +78,16 @@ export default function SnapviewMapOverlay({ sv, onClose }) {
         try {
           const fields = await getFieldsForTable(conn, tableName, key);
           const cap = sv.cap || 3000;
+
+          const q = (useStore.getState().globalSearch || '').trim();
+          let where = '';
+          if (q) {
+            const useFts = await tableHasFts(conn, tableName);
+            where = `WHERE ${buildNameFilterSql(tableName, q, { useFts })}`;
+          }
+
           const result = await conn.query(
-            `SELECT ${fields.selectParts.join(', ')} FROM "${tableName}" LIMIT ${cap}`,
+            `SELECT ${fields.selectParts.join(', ')} FROM "${tableName}" ${where} LIMIT ${cap}`,
           );
           const rows = result.toArray();
           for (const row of rows) {
@@ -97,7 +108,7 @@ export default function SnapviewMapOverlay({ sv, onClose }) {
       leafletMapRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [globalSearch]);
 
   const title = sv.keys.map(k => k.split('/')[1]).join(', ');
 

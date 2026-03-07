@@ -4,8 +4,43 @@
 // - The FTS extension may not be available in all WASM builds.
 // - These helpers are best-effort and should never break core app behavior.
 
-function escapeSqlString(s) {
+export function escapeSqlString(s) {
   return String(s).replace(/'/g, "''");
+}
+
+// Pure SQL snippet builder (easy to unit-test)
+export function buildNameFilterSql(tableName, q, { useFts = false } = {}) {
+  const query = String(q || '').trim();
+  if (!tableName || !query) return '';
+
+  const qq = escapeSqlString(query);
+
+  if (useFts) {
+    // DuckDB FTS convention: fts_main_<table>.match('query')
+    return `fts_main_${tableName}.match('${qq}')`;
+  }
+
+  return `display_name ILIKE '%${qq}%'`;
+}
+
+const FTS_PRESENT_CACHE = new Map();
+
+export async function tableHasFts(conn, tableName) {
+  if (!conn || !tableName) return false;
+  if (FTS_PRESENT_CACHE.has(tableName)) return FTS_PRESENT_CACHE.get(tableName);
+
+  try {
+    // FTS extension creates helper table fts_main_<table>
+    const rows = (await conn.query(
+      `SELECT 1 AS ok FROM information_schema.tables WHERE table_name='fts_main_${escapeSqlString(tableName)}' LIMIT 1`
+    )).toArray();
+    const ok = rows.length > 0;
+    FTS_PRESENT_CACHE.set(tableName, ok);
+    return ok;
+  } catch {
+    FTS_PRESENT_CACHE.set(tableName, false);
+    return false;
+  }
 }
 
 export async function ensureFtsIndex(conn, tableName) {
@@ -17,9 +52,12 @@ export async function ensureFtsIndex(conn, tableName) {
     await conn.query(
       `PRAGMA create_fts_index('${escapeSqlString(tableName)}', 'id', 'display_name');`
     );
+    // index creation implies helper tables exist
+    FTS_PRESENT_CACHE.set(tableName, true);
     return true;
   } catch {
     // No-op: FTS not available / bad schema / older DuckDB.
+    FTS_PRESENT_CACHE.set(tableName, false);
     return false;
   }
 }
@@ -33,7 +71,6 @@ export async function ftsSearchTable(conn, tableName, q, limit = 10) {
   const qq = escapeSqlString(query);
 
   try {
-    // DuckDB FTS convention: fts_main_<table>.match('query')
     const rows = (await conn.query(`
       SELECT
         id,
