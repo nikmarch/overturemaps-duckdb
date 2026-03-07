@@ -1,18 +1,18 @@
 import L from 'leaflet';
 import { PROXY, PALETTE_16, THEME_COLORS, DEFAULT_COLOR } from './constants.js';
-import { getConn } from './duckdb.js';
+import { getConn, getDb } from './duckdb.js';
 import { getMap, getBbox, bboxContains } from './map.js';
-import { bboxFilter, getFieldsForTable } from './query.js';
+import { bboxFilter, buildCacheSelect, getFieldsForTable } from './query.js';
 import { renderFeature } from './render.js';
 import { darkenHex } from './render.js';
 import { isIntersectionMode, recomputeIntersections } from './intersections.js';
-import { setSnapviewRelease } from './snapviews.js';
 import {
   useStore,
   updateSnapviewTheme,
   checkSnapviewComplete,
   failSnapview,
 } from './store.js';
+import { saveTableCache } from './snapviewDb.js';
 
 export const themeState = {};
 export let currentRelease = null;
@@ -176,6 +176,15 @@ async function renderBatched(rows, state, color, extraFields) {
   }
 }
 
+async function cacheTableToIdb(tableName, { bbox, release }) {
+  const db = getDb();
+  const conn = getConn();
+  const tmpPath = `/tmp/${tableName}.parquet`;
+  await conn.query(`COPY "${tableName}" TO '${tmpPath}' (FORMAT PARQUET)`);
+  const buf = await db.copyFileToBuffer(tmpPath);
+  await saveTableCache(tableName, buf, { bbox, release });
+}
+
 export async function loadTheme(key, snapviewId) {
   const conn = getConn();
   const [theme, type] = key.split('/');
@@ -235,6 +244,13 @@ export async function loadTheme(key, snapviewId) {
         let fields = null;
         const renderLimit = getRenderLimit(svCap);
 
+        // Peek parquet schema once to build a minimal, stable SELECT
+        const schemaRes = await conn.query(
+          `DESCRIBE SELECT * FROM read_parquet(['${files[0]}'], hive_partitioning=false) LIMIT 0`
+        );
+        const parquetCols = new Set(schemaRes.toArray().map(r => r.column_name));
+        const cacheSelect = buildCacheSelect(parquetCols, key);
+
         for (let i = 0; i < files.length && totalLoaded < limit; i += batchSize) {
           const batch = files.slice(i, i + batchSize);
           const remaining = limit - totalLoaded;
@@ -245,10 +261,7 @@ export async function loadTheme(key, snapviewId) {
           if (i === 0) {
             await conn.query(`
               CREATE TABLE "${tableName}" AS
-              SELECT *, ST_GeometryType(geometry) as geom_type,
-                     ST_AsGeoJSON(geometry) as geojson,
-                     ST_X(ST_Centroid(geometry)) as centroid_lon,
-                     ST_Y(ST_Centroid(geometry)) as centroid_lat
+              SELECT ${cacheSelect}
               FROM read_parquet([${fileList}], hive_partitioning=false)
               WHERE ${bboxFilter(bbox)}
               LIMIT ${remaining}
@@ -257,10 +270,7 @@ export async function loadTheme(key, snapviewId) {
           } else {
             await conn.query(`
               INSERT INTO "${tableName}"
-              SELECT *, ST_GeometryType(geometry) as geom_type,
-                     ST_AsGeoJSON(geometry) as geojson,
-                     ST_X(ST_Centroid(geometry)) as centroid_lon,
-                     ST_Y(ST_Centroid(geometry)) as centroid_lat
+              SELECT ${cacheSelect}
               FROM read_parquet([${fileList}], hive_partitioning=false)
               WHERE ${bboxFilter(bbox)}
               LIMIT ${remaining}
@@ -295,6 +305,14 @@ export async function loadTheme(key, snapviewId) {
           await new Promise(r => setTimeout(r, 0));
         }
       }
+      // Build R-tree spatial index for fast geometry queries
+      try {
+        await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
+      } catch { /* RTREE may not be available in this WASM build */ }
+
+      // Fire-and-forget: cache table to IndexedDB for cross-session restore
+      cacheTableToIdb(tableName, { bbox, release: currentRelease }).catch(e => console.warn('IDB cache:', e));
+
       state.bbox = { ...bbox };
       state.loadedCount = state.markers.length;
     } else {
@@ -432,6 +450,16 @@ export async function enableThemeFromCache(key, snapviewBbox, snapviewCap) {
   updateStats();
 }
 
+export function setThemeLayersVisible(visible) {
+  const map = getMap();
+  if (!map) return;
+  for (const state of Object.values(themeState)) {
+    if (!state?.layer) continue;
+    if (visible) state.layer.addTo(map);
+    else state.layer.remove();
+  }
+}
+
 export function disableTheme(key) {
   const state = themeState[key];
   if (!state || !state.enabled) return;
@@ -497,7 +525,6 @@ export async function onReleaseChange(release) {
   const map = getMap();
   currentRelease = release;
   useStore.setState({ selectedRelease: release });
-  setSnapviewRelease(release);
 
   for (const key of Object.keys(themeState)) {
     themeState[key].layer.clearLayers();

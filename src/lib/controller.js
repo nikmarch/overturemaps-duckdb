@@ -20,17 +20,38 @@ import {
   updateSnapviewTheme,
   checkSnapviewComplete,
   updateSnapviewCap,
+  hydrateSnapviewMeta,
 } from './store.js';
+import { saveSnapviewMeta, loadAllSnapviewMeta, deleteSnapviewMeta, loadTableCache, clearAllTableCache } from './snapviewDb.js';
+import { getConn, getDb } from './duckdb.js';
 
 export { onReleaseChange as setRelease };
 export { toggleTheme };
 export { setThemeLimit };
 
-// The currently active snapview id
 let activeSnapviewId = null;
 
-function bboxKey(bbox) {
-  return [bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax].map(n => n.toFixed(5)).join(',');
+function makeId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+async function importTableFromIdb(key) {
+  const conn = getConn();
+  const db = getDb();
+  const tableName = key.replace('/', '_');
+  const cached = await loadTableCache(tableName);
+  if (!cached) return false;
+
+  const existing = (await conn.query('SHOW TABLES')).toArray().map(t => t.name);
+  if (!existing.includes(tableName)) {
+    await db.registerFileBuffer(`${tableName}.parquet`, cached.parquetBuffer);
+    await conn.query(`CREATE TABLE "${tableName}" AS SELECT * FROM read_parquet('${tableName}.parquet')`);
+    try {
+      await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
+    } catch { /* RTREE may not be available */ }
+  }
+  if (themeState[key]) themeState[key].bbox = cached.bbox;
+  return true;
 }
 
 // Find an existing snapview whose bbox contains the current one and already has the key
@@ -62,7 +83,7 @@ function getOrCreateActiveSnapview(bbox, keys) {
   }
 
   // Create a new snapview
-  const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const id = makeId();
   createSnapview(id, bbox, keys);
   return id;
 }
@@ -84,13 +105,20 @@ export function deleteSnapview(snapviewId) {
   }
 
   deleteSnapviewFromStore(snapviewId);
+  deleteSnapviewMeta(snapviewId);
   updateStats();
 }
 
-export function loadArea(keys) {
-  const bbox = getBbox();
-  const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
-  createSnapview(id, bbox, keys);
+export function loadArea(keys, bbox) {
+  // Only one snapview at a time — drop existing ones
+  const existing = useStore.getState().snapviews;
+  for (const sv of existing) {
+    deleteSnapview(sv.id);
+  }
+
+  const b = bbox || getBbox();
+  const id = makeId();
+  createSnapview(id, b, keys);
   activeSnapviewId = id;
   useStore.setState({ activeSnapview: id });
 
@@ -101,14 +129,76 @@ export function loadArea(keys) {
   }
 }
 
-// Watch for snapview completion to unlock the map
+// Watch for snapview completion: unlock map + persist metadata
 useStore.subscribe(
   s => s.snapviews,
   (snapviews) => {
     const anyLoading = snapviews.some(sv => sv.status === 'loading');
     if (!anyLoading) unlockMap();
+
+    for (const sv of snapviews) {
+      if (sv.status === 'done' && sv.hasData) {
+        saveSnapviewMeta(sv);
+      }
+    }
   },
 );
+
+export async function initSnapviewHistory() {
+  const metas = await loadAllSnapviewMeta();
+  if (metas.length > 0) hydrateSnapviewMeta(metas);
+  if (!getConn() || !getDb()) return;
+
+  let restored = 0;
+  const seen = new Set();
+  for (const sv of metas) {
+    for (const key of sv.keys) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      try {
+        if (await importTableFromIdb(key)) restored++;
+      } catch (e) {
+        console.warn(`IDB restore ${key}:`, e);
+      }
+    }
+  }
+  if (restored > 0) {
+    useStore.setState({ status: { text: `Restored ${restored} table${restored > 1 ? 's' : ''} from cache`, type: 'success' } });
+  }
+}
+
+export async function reloadFromMeta(sv) {
+  const { bbox, keys } = sv;
+
+  getMap().fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [0, 0] });
+  await new Promise(r => setTimeout(r, 150));
+
+  // Try IDB cache for all tables
+  if (getConn() && getDb()) {
+    const results = await Promise.all(keys.map(k =>
+      importTableFromIdb(k).catch(() => false)
+    ));
+    if (results.every(Boolean)) {
+      deleteSnapviewFromStore(sv.id);
+      await deleteSnapviewMeta(sv.id);
+      const id = makeId();
+      createSnapview(id, bbox, keys);
+      activeSnapviewId = id;
+      useStore.setState({ activeSnapview: id });
+      for (const key of keys) {
+        await enableThemeFromCache(key, bbox, sv.cap);
+        updateSnapviewTheme(id, key, { status: 'done', rowCount: themeState[key]?.markers.length || 0 });
+      }
+      checkSnapviewComplete(id);
+      useStore.setState({ status: { text: `Restored ${keys.length} table${keys.length > 1 ? 's' : ''} from cache`, type: 'success' } });
+      return;
+    }
+  }
+
+  deleteSnapviewFromStore(sv.id);
+  await deleteSnapviewMeta(sv.id);
+  loadArea(keys, bbox);
+}
 
 export function onMapMove() {
   useStore.setState(s => ({
@@ -213,6 +303,7 @@ export async function clearCache() {
   clearSnapviews();
   clearIntersectionState();
   await dropAllTables();
+  await clearAllTableCache();
   clearAllThemes();
 
   const requests = Object.keys(themeState).map((key) => {

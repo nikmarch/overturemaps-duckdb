@@ -14,7 +14,27 @@ env:
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
 jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
   deploy:
+    needs: checks
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,19 +48,37 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Compute deployment vars
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BRANCH="${{ github.head_ref }}"
+            # Sanitize: lowercase, non-alphanumeric → hyphens, collapse/trim hyphens, max 44 chars
+            SANITIZED=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//' | cut -c1-44)
+            WORKER_NAME="overture-s3-proxy-${SANITIZED}"
+          else
+            WORKER_NAME="overture-s3-proxy"
+          fi
+          WORKER_URL="https://${WORKER_NAME}.${{ env.CLOUDFLARE_SUBDOMAIN }}.workers.dev"
+          echo "worker_name=${WORKER_NAME}" >> $GITHUB_OUTPUT
+          echo "worker_url=${WORKER_URL}" >> $GITHUB_OUTPUT
+
       - name: Install worker dependencies
         run: npm install
         working-directory: worker
 
       - name: Deploy Worker
-        run: npx wrangler deploy
+        run: npx wrangler deploy --name ${{ steps.vars.outputs.worker_name }}
         working-directory: worker
 
       - name: Build frontend
         run: npm install && npm run build
 
       - name: Prepare deploy directory
-        run: cp -r functions dist/
+        run: |
+          cp -r functions dist/
+          # Patch Pages function to point to this deployment's worker
+          sed -i "s|https://overture-s3-proxy\.zarbazan\.workers\.dev|${{ steps.vars.outputs.worker_url }}|g" 'dist/functions/api/[[path]].js'
 
       - name: Create Pages project if needed
         run: npx wrangler pages project create overture-maps --production-branch=master 2>/dev/null || true
@@ -60,8 +98,9 @@ jobs:
           script: |
             const branch = '${{ github.head_ref }}'.replace(/\//g, '-');
             const previewUrl = `https://${branch}.overture-maps.pages.dev`;
+            const workerUrl = '${{ steps.vars.outputs.worker_url }}';
             const marker = '<!-- preview-comment -->';
-            const body = `${marker}\n🚀 Preview deployed to: ${previewUrl}`;
+            const body = `${marker}\n🚀 Preview: ${previewUrl}\n🔧 Worker: ${workerUrl}`;
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
