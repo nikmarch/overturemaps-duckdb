@@ -3,6 +3,8 @@ import L from 'leaflet';
 import { getConn } from '../../lib/duckdb.js';
 import { getMap } from '../../lib/map.js';
 import { ftsSearchTable, listUserTables } from '../../lib/fts.js';
+import { getThemeColor } from '../../lib/themes.js';
+import { renderFeature } from '../../lib/render.js';
 
 const LIMIT = 10;
 const DEBOUNCE_MS = 200;
@@ -18,8 +20,19 @@ export default function MapSearch() {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const markerRef = useRef(null);
+  const overlayRef = useRef(null);
 
   const trimmed = useMemo(() => q.trim(), [q]);
+
+  useEffect(() => {
+    const map = getMap();
+    if (!map) return;
+    overlayRef.current = L.layerGroup().addTo(map);
+    return () => {
+      overlayRef.current?.remove();
+      overlayRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -65,6 +78,9 @@ export default function MapSearch() {
       markerRef.current.remove();
       markerRef.current = null;
     }
+    if (overlayRef.current) {
+      overlayRef.current.clearLayers();
+    }
   }
 
   function highlight(lat, lon) {
@@ -87,12 +103,53 @@ export default function MapSearch() {
     const map = getMap();
     if (!map) return;
 
-    const lat = Number(r.centroid_lat);
-    const lon = Number(r.centroid_lon);
-    if (Number.isFinite(lat) && Number.isFinite(lon)) {
-      map.setView([lat, lon], Math.max(map.getZoom(), 14));
-      highlight(lat, lon);
-    }
+    (async () => {
+      const conn = getConn();
+      const tableName = r.source_table;
+      const id = String(r.id);
+
+      // Prefer: load full feature and mimic the popup "zoom to" behavior.
+      // Fallback: jump to centroid.
+      try {
+        const rows = (await conn.query(`
+          SELECT id, display_name, centroid_lon, centroid_lat, geom_type, geojson
+          FROM "${tableName}"
+          WHERE id = '${id.replace(/'/g, "''")}';
+        `)).toArray();
+        const row = rows?.[0];
+        if (row) {
+          clearHighlight();
+
+          const key = formatSource(tableName);
+          const color = getThemeColor(key);
+          const state = { key, layer: overlayRef.current, markers: [] };
+          renderFeature(row, state, color, []);
+
+          const layer = state.markers?.[0]?.layer;
+          if (layer) {
+            if (layer.getLatLng) {
+              map.setView(layer.getLatLng(), Math.max(map.getZoom(), 16));
+            } else {
+              const bounds = layer.getBounds?.();
+              if (bounds && bounds.isValid && bounds.isValid()) {
+                map.fitBounds(bounds, { padding: [0, 0] });
+              }
+            }
+            layer.openPopup?.();
+            return;
+          }
+        }
+      } catch {
+        // ignore
+      }
+
+      const lat = Number(r.centroid_lat);
+      const lon = Number(r.centroid_lon);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        map.setView([lat, lon], Math.max(map.getZoom(), 16));
+        highlight(lat, lon);
+      }
+    })();
 
     setOpen(false);
   }
