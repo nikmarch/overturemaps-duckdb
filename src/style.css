@@ -99,6 +99,38 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   transform: translateY(-1px);
 }
 
+/* Query status HUD */
+.query-hud {
+  position: absolute;
+  top: 52px;
+  right: 12px;
+  z-index: 1250;
+  font-size: 11px;
+  color: rgba(255,255,255,0.92);
+  background: rgba(0,0,0,0.45);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 10px;
+  padding: 6px 8px;
+  width: min(420px, calc(100vw - 20px));
+  backdrop-filter: blur(6px);
+}
+.query-hud__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0;
+}
+.query-hud__row.ok { color: rgba(200,255,200,0.95); }
+.query-hud__row.err { color: rgba(255,200,200,0.95); }
+.query-hud__row.running { color: rgba(255,255,255,0.95); }
+.query-hud__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+.query-hud__ms { opacity: 0.9; }
+
 /* Map Search */
 .map-search {
   position: absolute;

@@ -17,7 +17,18 @@ export const useStore = create(subscribeWithSelector((_set, _get) => ({
   viewportStats: { shownText: '-', enabledCount: 0, totalThemes: 0, viewportText: '-', totalRendered: 0 },
   snapviews: [],
   activeSnapview: null,
-  globalSearch: "",
+  globalSearch: "", // legacy (MapSearch uses it today)
+
+  // Reactive pipeline (new architecture)
+  pipeline: {
+    sources: ['places/place', 'buildings/building'],
+    combine: { mode: 'union', a: null, b: null, distanceMeters: 250 },
+    limit: 10000,
+    // global text filter (FTS/ILIKE)
+    text: '',
+  },
+  sql: { compiled: '', lastRunAt: null, lastDurationMs: null },
+  queryStatus: [],
 })));
 
 // Persist viewportCap to localStorage
