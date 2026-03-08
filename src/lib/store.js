@@ -5,7 +5,7 @@ const VIEWPORT_CAP_KEY = 'overture_viewport_cap';
 const DEFAULT_VIEWPORT_CAP = 3000;
 const savedCap = parseInt(localStorage.getItem(VIEWPORT_CAP_KEY), 10);
 
-export const useStore = create(subscribeWithSelector((set, get) => ({
+export const useStore = create(subscribeWithSelector((_set, _get) => ({
   status: { text: 'Initializing...', type: 'loading' },
   releases: [],
   selectedRelease: null,
@@ -17,6 +17,18 @@ export const useStore = create(subscribeWithSelector((set, get) => ({
   viewportStats: { shownText: '-', enabledCount: 0, totalThemes: 0, viewportText: '-', totalRendered: 0 },
   snapviews: [],
   activeSnapview: null,
+  globalSearch: "", // legacy (MapSearch uses it today)
+
+  // Reactive pipeline (new architecture)
+  pipeline: {
+    sources: ['places/place', 'buildings/building'],
+    combine: { mode: 'union', a: null, b: null, distanceMeters: 250 },
+    limit: 10000,
+    // global text filter (FTS/ILIKE)
+    text: '',
+  },
+  sql: { compiled: '', lastRunAt: null, lastDurationMs: null },
+  queryStatus: [],
 })));
 
 // Persist viewportCap to localStorage

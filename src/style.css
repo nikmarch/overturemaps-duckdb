@@ -99,6 +99,116 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   transform: translateY(-1px);
 }
 
+/* Query status HUD */
+.query-hud {
+  position: absolute;
+  top: 52px;
+  right: 12px;
+  z-index: 1250;
+  font-size: 11px;
+  color: rgba(255,255,255,0.92);
+  background: rgba(0,0,0,0.45);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 10px;
+  padding: 6px 8px;
+  width: min(420px, calc(100vw - 20px));
+  backdrop-filter: blur(6px);
+}
+.query-hud__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0;
+}
+.query-hud__row.ok { color: rgba(200,255,200,0.95); }
+.query-hud__row.err { color: rgba(255,200,200,0.95); }
+.query-hud__row.running { color: rgba(255,255,255,0.95); }
+.query-hud__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+.query-hud__ms { opacity: 0.9; }
+
+/* Map Search */
+.map-search {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1200;
+  width: min(420px, calc(100vw - 20px));
+}
+.map-search__input {
+  width: 100%;
+  padding: 10px 34px 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(0,0,0,0.15);
+  background: rgba(255,255,255,0.95);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  font-size: 14px;
+}
+.map-search__clear {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid rgba(0,0,0,0.12);
+  background: rgba(255,255,255,0.9);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 18px;
+  padding: 0;
+}
+.map-search__clear:hover {
+  background: rgba(255,255,255,1);
+}
+.map-search__loading {
+  margin-top: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #555;
+  background: rgba(255,255,255,0.95);
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 10px;
+  width: fit-content;
+}
+.map-search__results {
+  margin-top: 6px;
+  background: rgba(255,255,255,0.98);
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.18);
+}
+.map-search__result {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.map-search__result:hover {
+  background: rgba(0,0,0,0.04);
+}
+.map-search__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #222;
+  line-height: 1.2;
+}
+.map-search__meta {
+  font-size: 11px;
+  color: #666;
+}
+
 /* Theme dot (shared) */
 .theme-dot {
   width: 10px;
@@ -371,7 +481,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .snapview-panel {
   position: absolute;
   top: 10px;
-  left: 10px;
+  right: 10px;
   z-index: 1000;
   background: rgba(255, 255, 255, 0.94);
   backdrop-filter: blur(10px);
