@@ -12,7 +12,17 @@ export async function initDuckDB() {
   db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
   await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
   conn = await db.connect();
+
   await conn.query('INSTALL spatial; LOAD spatial;');
+
+  // FTS is optional in some WASM builds / hosting contexts.
+  // If it fails to load, we fall back to ILIKE queries.
+  try {
+    await conn.query('INSTALL fts; LOAD fts;');
+  } catch (e) {
+    console.warn('DuckDB FTS extension unavailable:', e?.message || e);
+  }
+
   return conn;
 }
 
