@@ -11,6 +11,7 @@ import { compilePipeline } from './pipeline.js';
 import { getThemeColor } from './themes.js';
 import { renderFeature } from './render.js';
 import { THEME_FIELDS } from './constants.js';
+import { tableHasFts } from './fts.js';
 
 let pipelineLayer = null;
 let debounceTimer = null;
@@ -50,16 +51,27 @@ export async function runPipeline() {
 
   // Use drawn bbox (data is loaded for this area)
   const bbox = pipelineBbox;
+
+  // Resolve which tables have FTS indexes for search optimization
+  const conn = getConn();
+  const ftsTables = new Set();
+  if (pipelineSearch && conn) {
+    const tables = new Set(pipeline.map(n => n.table));
+    await Promise.all([...tables].map(async t => {
+      if (await tableHasFts(conn, t)) ftsTables.add(t);
+    }));
+  }
+
   const compiled = compilePipeline(pipeline, {
     search: pipelineSearch,
     limit: pipelineLimit,
     bbox,
+    ftsTables,
   });
 
   const sql = sqlOverride || compiled;
   useStore.setState({ compiledSql: compiled, pipelineRunning: true });
 
-  const conn = getConn();
   if (!conn || !sql) {
     useStore.setState({ pipelineRunning: false });
     return;

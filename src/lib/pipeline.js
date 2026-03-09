@@ -12,7 +12,7 @@
 import { THEME_FIELDS } from './constants.js';
 import { escapeSqlString } from './fts.js';
 
-export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null } = {}) {
+export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null, ftsTables = new Set() } = {}) {
   if (!nodes.length) return '';
 
   const sources = [];
@@ -45,6 +45,9 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null 
   // Per-source limit so each table gets a fair share in the UNION
   const perSourceLimit = Math.ceil(limit / sources.length);
 
+  // Build per-source search clause
+  const searchQ = search ? escapeSqlString(search) : '';
+
   // Build UNION CTE
   const unionParts = sources.map(n => {
     const defs = THEME_FIELDS[n.key] || [];
@@ -58,7 +61,16 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null 
       ...fCols,
       `'${n.key}' AS _source`,
     ];
-    return `  (SELECT ${cols.join(', ')}\n  FROM "${n.table}"\n  LIMIT ${perSourceLimit})`;
+    // Push search into each source so FTS index is used per-table
+    let where = '';
+    if (searchQ) {
+      if (ftsTables.has(n.table)) {
+        where = `\n  WHERE fts_main_${n.table}.match_bm25(id, '${searchQ}') IS NOT NULL`;
+      } else {
+        where = `\n  WHERE display_name ILIKE '%${searchQ}%'`;
+      }
+    }
+    return `  (SELECT ${cols.join(', ')}\n  FROM "${n.table}"${where}\n  LIMIT ${perSourceLimit})`;
   });
 
   // Output SELECT (convert geometry to GeoJSON here, not in CTE)
@@ -125,10 +137,8 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null 
     }
   });
 
-  // Text search
-  if (search) {
-    wheres.push(`display_name ILIKE '%${escapeSqlString(search)}%'`);
-  }
+  // Text search is pushed into each source subquery (see UNION above)
+  // so that per-table FTS indexes are used when available.
 
   // ── Assemble ──
 
