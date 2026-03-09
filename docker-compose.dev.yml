@@ -1,0 +1,13 @@
+services:
+  ui:
+    image: node:22-alpine
+    working_dir: /app
+    ports:
+      - "8123:8123"
+    volumes:
+      - ./:/app
+      - ui_node_modules:/app/node_modules
+    command: sh -c "npm install && npm run dev"
+
+volumes:
+  ui_node_modules:
