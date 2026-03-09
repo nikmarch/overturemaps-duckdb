@@ -3,7 +3,6 @@ import { useStore } from '../../lib/store.js';
 import { setRelease } from '../../lib/controller.js';
 import { getThemeColor } from '../../lib/themes.js';
 import { PROXY } from '../../lib/constants.js';
-import { getBbox } from '../../lib/map.js';
 
 export default function LoadModal({ open, onClose, onLoad }) {
   const [selected, setSelected] = useState(new Set());
@@ -22,7 +21,7 @@ export default function LoadModal({ open, onClose, onLoad }) {
     if (!open || !selectedRelease || themeList.length === 0) return;
 
     let cancelled = false;
-    const bbox = getBbox();
+    const bbox = useStore.getState().pipelineBbox;
     if (!bbox) return;
 
     const counts = {};

@@ -17,17 +17,19 @@ export const useStore = create(subscribeWithSelector((_set, _get) => ({
   viewportStats: { shownText: '-', enabledCount: 0, totalThemes: 0, viewportText: '-', totalRendered: 0 },
   snapviews: [],
   activeSnapview: null,
-  globalSearch: "", // legacy (MapSearch uses it today)
+  globalSearch: "",
 
-  // Reactive pipeline (new architecture)
-  pipeline: {
-    sources: ['places/place', 'buildings/building'],
-    combine: { mode: 'union', a: null, b: null, distanceMeters: 250 },
-    limit: 10000,
-    // global text filter (FTS/ILIKE)
-    text: '',
-  },
-  sql: { compiled: '', lastRunAt: null, lastDurationMs: null },
+  // Reactive pipeline
+  pipeline: [],           // [{ id, type: 'source'|'combine', op?, table, key, distance? }]
+  pipelineSearch: '',     // text filter (ILIKE on display_name)
+  pipelineLimit: 3000,    // result cap
+  compiledSql: '',        // auto-compiled SQL from pipeline
+  sqlOverride: null,      // user-edited SQL (overrides compiledSql when set)
+  pipelineResult: null,   // { count, durationMs } or { error }
+  pipelineRunning: false,
+  pipelineBbox: null,     // null = use viewport, { xmin, xmax, ymin, ymax } = drawn rectangle
+  loadedTables: [],       // ['places_place', 'buildings_building', ...]
+
   queryStatus: [],
 })));
 
@@ -163,6 +165,65 @@ export function hydrateSnapviewMeta(metaList) {
     const newSvs = svs.filter(sv => !existingIds.has(sv.id));
     return { snapviews: [...s.snapviews, ...newSvs].slice(0, 50) };
   });
+}
+
+// --- Pipeline helpers ---
+
+let pipelineIdCounter = 1;
+function pipelineId() {
+  return 'p' + (pipelineIdCounter++);
+}
+
+export function addLoadedTable(tableName, key) {
+  useStore.setState(s => {
+    if (s.loadedTables.includes(tableName)) return {};
+
+    const loadedTables = [...s.loadedTables, tableName];
+
+    // Auto-add pipeline node for newly loaded table
+    const hasNode = s.pipeline.some(n => n.table === tableName);
+    if (hasNode) return { loadedTables };
+
+    const node = {
+      id: pipelineId(),
+      type: s.pipeline.length === 0 ? 'source' : 'combine',
+      op: s.pipeline.length === 0 ? undefined : 'union',
+      table: tableName,
+      key,
+    };
+    return { loadedTables, pipeline: [...s.pipeline, node] };
+  });
+}
+
+export function addPipelineNode(node) {
+  useStore.setState(s => ({
+    pipeline: [...s.pipeline, { ...node, id: node.id || pipelineId() }],
+    sqlOverride: null,
+  }));
+}
+
+export function removePipelineNode(id) {
+  useStore.setState(s => {
+    let pipeline = s.pipeline.filter(n => n.id !== id);
+    // If we removed the source, promote the first remaining node to source
+    if (pipeline.length > 0 && !pipeline.some(n => n.type === 'source')) {
+      pipeline = pipeline.map((n, i) =>
+        i === 0 ? { ...n, type: 'source', op: undefined } : n
+      );
+    }
+    return { pipeline, sqlOverride: null };
+  });
+}
+
+export function updatePipelineNode(id, patch) {
+  useStore.setState(s => ({
+    pipeline: s.pipeline.map(n => n.id === id ? { ...n, ...patch } : n),
+    sqlOverride: null,
+  }));
+}
+
+export function clearPipeline() {
+  useStore.setState({ pipeline: [], sqlOverride: null, pipelineResult: null });
 }
 
 // --- Selectors (replace Svelte derived stores) ---

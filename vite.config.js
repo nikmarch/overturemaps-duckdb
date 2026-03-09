@@ -10,4 +10,13 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['@duckdb/duckdb-wasm'],
   },
+  server: {
+    proxy: {
+      '/api': {
+        target: 'https://overture-s3-proxy.zarbazan.workers.dev',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+    },
+  },
 });
