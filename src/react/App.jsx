@@ -20,7 +20,6 @@ export default function App() {
   const [drawing, setDrawing] = useState(false);
   const [initialized, setInitialized] = useState(false);
   const hasPipeline = useStore(s => s.pipeline.length > 0);
-  const drawnBbox = useStore(s => s.pipelineBbox);
 
   useEffect(() => {
     async function init() {
@@ -73,10 +72,10 @@ export default function App() {
       )}
       <button
         className="load-area-btn"
-        onClick={drawnBbox ? () => setModalOpen(true) : handleDraw}
-        title={drawnBbox ? 'Change themes for selected area' : 'Draw rectangle to select area'}
+        onClick={handleDraw}
+        title="Draw rectangle to select area and load themes"
       >
-        {drawing ? 'Drawing...' : drawnBbox ? 'Load Themes' : 'Select Area'}
+        {drawing ? 'Drawing...' : 'Select Area'}
       </button>
       <LoadModal open={modalOpen} onClose={() => setModalOpen(false)} onLoad={handleLoad} />
       <FilterPipeline />

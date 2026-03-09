@@ -38,6 +38,9 @@ export function startDraw(onComplete) {
   if (!map || active) return;
   drawCallback = onComplete || null;
 
+  // Clear previous rectangle
+  if (rectLayer) { rectLayer.remove(); rectLayer = null; }
+
   active = true;
   map.getContainer().classList.add('map-drawing');
 
