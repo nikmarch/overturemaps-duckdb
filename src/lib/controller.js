@@ -21,9 +21,11 @@ import {
   checkSnapviewComplete,
   updateSnapviewCap,
   hydrateSnapviewMeta,
+  addLoadedTable,
 } from './store.js';
 import { saveSnapviewMeta, loadAllSnapviewMeta, deleteSnapviewMeta, loadTableCache, clearAllTableCache } from './snapviewDb.js';
 import { getConn, getDb } from './duckdb.js';
+import { ensureFtsIndex } from './fts.js';
 
 export { onReleaseChange as setRelease };
 export { toggleTheme };
@@ -49,8 +51,11 @@ async function importTableFromIdb(key) {
     try {
       await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
     } catch { /* RTREE may not be available */ }
+
+    await ensureFtsIndex(conn, tableName);
   }
   if (themeState[key]) themeState[key].bbox = cached.bbox;
+  addLoadedTable(tableName, key);
   return true;
 }
 
@@ -109,18 +114,27 @@ export function deleteSnapview(snapviewId) {
   updateStats();
 }
 
-export function loadArea(keys, bbox) {
-  // Only one snapview at a time — drop existing ones
+export async function loadArea(keys, bbox) {
+  if (!bbox) throw new Error('loadArea requires an explicit bbox');
+
+  // Clear previous state
   const existing = useStore.getState().snapviews;
   for (const sv of existing) {
     deleteSnapview(sv.id);
   }
 
-  const b = bbox || getBbox();
+  // Drop all DuckDB tables so loadTheme starts fresh
+  // (IDB cache is preserved — loadTheme will restore from it when bbox fits)
+  await dropAllTables();
+  clearAllThemes();
+
+  // Reset pipeline — new nodes will be added as tables load
+  useStore.setState({ pipeline: [], loadedTables: [], pipelineResult: null, sqlOverride: null });
+
   const id = makeId();
-  createSnapview(id, b, keys);
+  createSnapview(id, bbox, keys);
   activeSnapviewId = id;
-  useStore.setState({ activeSnapview: id });
+  useStore.setState({ activeSnapview: id, pipelineBbox: bbox });
 
   lockMap();
 

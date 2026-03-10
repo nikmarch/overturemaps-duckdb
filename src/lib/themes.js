@@ -11,8 +11,10 @@ import {
   updateSnapviewTheme,
   checkSnapviewComplete,
   failSnapview,
+  addLoadedTable,
 } from './store.js';
-import { saveTableCache } from './snapviewDb.js';
+import { saveTableCache, loadTableCache } from './snapviewDb.js';
+import { ensureFtsIndex, tableHasFts, buildNameFilterSql } from './fts.js';
 
 export const themeState = {};
 export let currentRelease = null;
@@ -20,6 +22,18 @@ const THEME_KEY_COLORS = {};
 
 function log(msg, type = 'loading') {
   useStore.setState({ status: { text: msg, type } });
+}
+
+async function globalSearchAnd(conn, tableName) {
+  const q = (useStore.getState().globalSearch || '').trim();
+  if (!q) return '';
+
+  const useFts = await tableHasFts(conn, tableName);
+  const clause = buildNameFilterSql(tableName, q, { useFts });
+  if (!clause) return '';
+
+  // Returned string is appended directly inside an existing WHERE clause.
+  return ` AND (${clause})`;
 }
 
 export function getThemeColor(key) {
@@ -141,11 +155,12 @@ async function rerenderThemeFromCache(key, overrideCap) {
 
   try {
     const fields = await getFieldsForTable(conn, tableName, key);
+    const searchAnd = await globalSearchAnd(conn, tableName);
     const rows = (await conn.query(`
       SELECT ${fields.selectParts.join(', ')}
       FROM "${tableName}"
       WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
-        AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
+        AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}${searchAnd}
       LIMIT ${renderLimit}
     `)).toArray();
     await renderBatched(rows, state, color, fields.extraFields);
@@ -187,9 +202,11 @@ async function cacheTableToIdb(tableName, { bbox, release }) {
 
 export async function loadTheme(key, snapviewId) {
   const conn = getConn();
+  const db = getDb();
   const [theme, type] = key.split('/');
   const state = themeState[key];
-  const bbox = getBbox();
+  // Use drawn bbox (pipelineBbox) — the area the user selected
+  const bbox = useStore.getState().pipelineBbox || getBbox();
   const limit = state.limit;
   const useCache = bboxContains(state.bbox, bbox);
   const color = getThemeColor(key);
@@ -216,6 +233,34 @@ export async function loadTheme(key, snapviewId) {
 
   try {
     if (!useCache) {
+      // Try restoring from IDB cache if cached bbox contains the new area
+      const idbCached = await loadTableCache(tableName);
+      if (idbCached && bboxContains(idbCached.bbox, bbox)) {
+        log(`Restoring ${type} from cache...`);
+        await db.registerFileBuffer(`${tableName}.parquet`, idbCached.parquetBuffer);
+        await conn.query(`CREATE TABLE "${tableName}" AS SELECT * FROM read_parquet('${tableName}.parquet')`);
+        try {
+          await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
+        } catch { /* RTREE may not be available */ }
+        await ensureFtsIndex(conn, tableName);
+        state.bbox = idbCached.bbox;
+        addLoadedTable(tableName, key);
+
+        const loadTimeMs = Math.round(performance.now() - t0);
+        const countRes = await conn.query(`SELECT count(*) AS c FROM "${tableName}"`);
+        const rowCount = Number(countRes.toArray()[0].c);
+
+        if (snapviewId) {
+          updateSnapviewTheme(snapviewId, key, { status: 'done', rowCount, fileCount: 0, loadTimeMs });
+          checkSnapviewComplete(snapviewId);
+        }
+        useStore.setState(s => ({
+          themeUi: { ...s.themeUi, [key]: { ...(s.themeUi[key] || {}), loading: false, loadTimeMs, rowCount } },
+        }));
+        log(`${rowCount.toLocaleString()} ${type} from cache (${formatDuration(loadTimeMs)})`, 'success');
+        return;
+      }
+
       log(`Loading ${type}...`);
 
       const filesUrl = `${PROXY}/files?release=${currentRelease}&theme=${theme}&type=${type}&xmin=${bbox.xmin}&xmax=${bbox.xmax}&ymin=${bbox.ymin}&ymax=${bbox.ymax}`;
@@ -283,13 +328,8 @@ export async function loadTheme(key, snapviewId) {
             LIMIT ${limit} OFFSET ${totalLoaded}
           `)).toArray();
 
-          // Render only up to the per-theme render budget
-          const renderBudget = renderLimit - totalRendered;
-          const toRender = renderBudget > 0 ? newRows.slice(0, renderBudget) : [];
-          for (const r of toRender) {
-            renderFeature(r, state, color, fields.extraFields);
-          }
-          totalRendered += toRender.length;
+          // Skip per-theme rendering — pipeline runner handles rendering
+          totalRendered += newRows.length;
           totalLoaded += newRows.length;
           updateStats();
 
@@ -310,24 +350,21 @@ export async function loadTheme(key, snapviewId) {
         await conn.query(`CREATE INDEX IF NOT EXISTS "idx_${tableName}_geom" ON "${tableName}" USING RTREE (geometry)`);
       } catch { /* RTREE may not be available in this WASM build */ }
 
+      // Best-effort: build an FTS index on display_name for map search.
+      // This is safe to skip if the extension isn't available.
+      await ensureFtsIndex(conn, tableName);
+
+      // Register table as loaded (triggers pipeline auto-node)
+      addLoadedTable(tableName, key);
+
       // Fire-and-forget: cache table to IndexedDB for cross-session restore
       cacheTableToIdb(tableName, { bbox, release: currentRelease }).catch(e => console.warn('IDB cache:', e));
 
       state.bbox = { ...bbox };
       state.loadedCount = state.markers.length;
     } else {
-      log(`Querying cached ${type}...`);
-      const renderLimit = getRenderLimit(svCap);
-      const fields = await getFieldsForTable(conn, tableName, key);
-      const rows = (await conn.query(`
-        SELECT ${fields.selectParts.join(', ')}
-        FROM "${tableName}"
-        WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
-          AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
-        LIMIT ${renderLimit}
-      `)).toArray();
-
-      await renderBatched(rows, state, color, fields.extraFields);
+      log(`Using cached ${type}...`);
+      addLoadedTable(tableName, key);
     }
 
     if (isIntersectionMode()) {
@@ -421,21 +458,17 @@ export async function enableThemeFromCache(key, snapviewBbox, snapviewCap) {
 
   let rowCount = 0;
   try {
+    // Pipeline runner handles rendering — just count rows
     const bbox = getBbox();
-    const fields = await getFieldsForTable(conn, tableName, key);
-    const rows = (await conn.query(`
-      SELECT ${fields.selectParts.join(', ')}
-      FROM "${tableName}"
-      WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
-        AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
-      LIMIT ${renderLimit}
-    `)).toArray();
-    await renderBatched(rows, state, color, fields.extraFields);
-    rowCount = rows.length;
+    const countRes = (await conn.query(
+      `SELECT COUNT(*) AS cnt FROM "${tableName}"`
+    )).toArray();
+    rowCount = Number(countRes[0]?.cnt || 0);
     if (snapviewBbox) {
       state.bbox = { ...snapviewBbox };
       state.loadedCount = rowCount;
     }
+    addLoadedTable(tableName, key);
     log(`${rowCount.toLocaleString()} ${type} (cached)`, 'success');
   } catch (e) {
     console.warn(`enableThemeFromCache ${key} failed:`, e?.message);
@@ -488,11 +521,12 @@ export async function rerenderAllEnabled(overrideCap) {
     try {
       const bbox = getBbox();
       const fields = await getFieldsForTable(conn, tableName, key);
+      const searchAnd = await globalSearchAnd(conn, tableName);
       const rows = (await conn.query(`
         SELECT ${fields.selectParts.join(', ')}
         FROM "${tableName}"
         WHERE centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}
-          AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}
+          AND centroid_lat >= ${bbox.ymin} AND centroid_lat <= ${bbox.ymax}${searchAnd}
         LIMIT ${renderLimit}
       `)).toArray();
       await renderBatched(rows, state, color, fields.extraFields);

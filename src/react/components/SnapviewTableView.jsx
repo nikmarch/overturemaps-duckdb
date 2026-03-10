@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { getConn } from '../../lib/duckdb.js';
 import { getThemeColor } from '../../lib/themes.js';
+import { useStore } from '../../lib/store.js';
+import { buildNameFilterSql, tableHasFts } from '../../lib/fts.js';
 
 function cellValue(val) {
   if (val == null) return '';
@@ -26,6 +28,7 @@ function TableSection({ themeKey }) {
   const tableName = themeKey.replace('/', '_');
   const label = themeKey.split('/')[1];
   const color = getThemeColor(themeKey);
+  const globalSearch = useStore(s => s.globalSearch);
 
   useEffect(() => {
     let cancelled = false;
@@ -35,7 +38,13 @@ function TableSection({ themeKey }) {
       try {
         const conn = getConn();
         if (!conn) throw new Error('No DB connection');
-        const result = await conn.query(`SELECT * FROM "${tableName}" LIMIT 1000`);
+        const q = (useStore.getState().globalSearch || '').trim();
+        let where = '';
+        if (q) {
+          const useFts = await tableHasFts(conn, tableName);
+          where = `WHERE ${buildNameFilterSql(tableName, q, { useFts })}`;
+        }
+        const result = await conn.query(`SELECT * FROM "${tableName}" ${where} LIMIT 1000`);
         if (cancelled) return;
         const rows = result.toArray();
         const columns = result.schema?.fields?.map(f => f.name) ?? (rows.length > 0 ? Object.keys(rows[0]) : []);
@@ -48,7 +57,7 @@ function TableSection({ themeKey }) {
     }
     load();
     return () => { cancelled = true; };
-  }, [tableName]);
+  }, [tableName, globalSearch]);
 
   return (
     <div>

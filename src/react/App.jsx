@@ -1,18 +1,25 @@
-import { useEffect, useState } from 'react';
-import SnapviewHistory from './components/SnapviewHistory';
+import { useEffect, useState, useCallback } from 'react';
+import FilterPipeline from './components/FilterPipeline';
+import SqlPanel from './components/SqlPanel';
+import TablePanel from './components/TablePanel';
 import LoadModal from './components/LoadModal';
-import StatusBar from './components/StatusBar';
+import ProgressOverlay from './components/ProgressOverlay';
+import QueryStatusHud from './components/QueryStatusHud';
 import { loadArea, initSnapviewHistory } from '../lib/controller.js';
 import { initMap } from '../lib/map.js';
 import { initDuckDB } from '../lib/duckdb.js';
 import { loadReleases } from '../lib/themes.js';
 import { initSnapviewsLayer } from '../lib/snapviews.js';
-import { onMapMove } from '../lib/controller.js';
+import { initPipelineRunner } from '../lib/pipelineRunner.js';
+import { startDraw } from '../lib/drawBbox.js';
 import { useStore } from '../lib/store.js';
 
 export default function App() {
   const [modalOpen, setModalOpen] = useState(false);
+  const [tableOpen, setTableOpen] = useState(false);
+  const [drawing, setDrawing] = useState(false);
   const [initialized, setInitialized] = useState(false);
+  const hasPipeline = useStore(s => s.pipeline.length > 0);
 
   useEffect(() => {
     async function init() {
@@ -20,11 +27,9 @@ export default function App() {
         useStore.setState({ status: { text: 'Loading DuckDB...', type: 'loading' } });
         await initDuckDB();
 
-        const map = initMap('map');
+        initMap('map');
         initSnapviewsLayer();
-
-        map.on('moveend', onMapMove);
-        setTimeout(onMapMove, 0);
+        initPipelineRunner();
 
         await loadReleases();
         await initSnapviewHistory();
@@ -37,23 +42,44 @@ export default function App() {
     init();
   }, []);
 
+  const handleDraw = useCallback(() => {
+    setDrawing(true);
+    startDraw((bbox) => {
+      setDrawing(false);
+      setModalOpen(true);
+    });
+  }, []);
+
   function handleLoad(keys) {
-    loadArea(keys);
+    const bbox = useStore.getState().pipelineBbox;
+    if (bbox) loadArea(keys, bbox);
   }
 
   return (
     <>
       <div id="map" />
-      <StatusBar />
+      <ProgressOverlay />
+      <QueryStatusHud />
+      <SqlPanel />
+      {hasPipeline && (
+        <button
+          className={`table-panel-btn${tableOpen ? ' active' : ''}`}
+          onClick={() => setTableOpen(o => !o)}
+          title="Show results as table"
+        >
+          Table
+        </button>
+      )}
       <button
         className="load-area-btn"
-        onClick={() => setModalOpen(true)}
-        title="Load themes for current viewport"
+        onClick={handleDraw}
+        title="Draw rectangle to select area and load themes"
       >
-        Load Area
+        {drawing ? 'Drawing...' : 'Select Area'}
       </button>
       <LoadModal open={modalOpen} onClose={() => setModalOpen(false)} onLoad={handleLoad} />
-      <SnapviewHistory />
+      <FilterPipeline />
+      {tableOpen && <TablePanel onClose={() => setTableOpen(false)} />}
     </>
   );
 }
