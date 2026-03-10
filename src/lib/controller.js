@@ -26,6 +26,8 @@ import {
 import { saveSnapviewMeta, loadAllSnapviewMeta, deleteSnapviewMeta, loadTableCache, clearAllTableCache } from './snapviewDb.js';
 import { getConn, getDb } from './duckdb.js';
 import { ensureFtsIndex } from './fts.js';
+import { decodeStateFromUrl, initUrlSync } from './urlState.js';
+import { showBboxRect } from './drawBbox.js';
 
 export { onReleaseChange as setRelease };
 export { toggleTheme };
@@ -385,3 +387,59 @@ export async function setHighlightIntersections(v) {
   await recomputeIntersections(themeState, currentRelease);
   rerenderAllEnabled();
 }
+
+// ── Restore snapview from URL ──
+
+export async function restoreFromUrl() {
+  const decoded = await decodeStateFromUrl();
+  if (!decoded) return false;
+
+  const { themeKeys, sql, search, limit } = decoded;
+  const bbox = decoded.bbox || getBbox();
+
+  useStore.setState({ status: { text: 'Restoring shared link...', type: 'loading' } });
+
+  // Show bbox and zoom to it
+  showBboxRect(bbox);
+  useStore.setState({ pipelineBbox: bbox });
+  if (decoded.bbox) {
+    const map = getMap();
+    if (map) map.fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [20, 20] });
+  }
+
+  // Load themes — this creates DuckDB tables and auto-adds pipeline nodes
+  if (themeKeys.length > 0) {
+    await loadArea(themeKeys, bbox);
+    await waitForTables(themeKeys.map(k => k.replace('/', '_')));
+  }
+
+  // Apply the shared SQL as override + search/limit
+  useStore.setState({
+    pipelineSearch: search,
+    pipelineLimit: limit,
+    ...(sql ? { sqlOverride: sql } : {}),
+  });
+
+  return true;
+}
+
+function waitForTables(tableNames, timeoutMs = 60000) {
+  const needed = new Set(tableNames);
+  return new Promise((resolve) => {
+    const check = () => {
+      const loaded = new Set(useStore.getState().loadedTables);
+      return [...needed].every(t => loaded.has(t));
+    };
+    if (check()) { resolve(); return; }
+
+    const timeout = setTimeout(() => { unsub(); resolve(); }, timeoutMs);
+    const unsub = useStore.subscribe(
+      s => s.loadedTables,
+      () => {
+        if (check()) { unsub(); clearTimeout(timeout); resolve(); }
+      },
+    );
+  });
+}
+
+export { initUrlSync };

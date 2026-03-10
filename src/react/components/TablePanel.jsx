@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../lib/store.js';
 import { getConn } from '../../lib/duckdb.js';
-import { compilePipeline } from '../../lib/pipeline.js';
 
 function cellValue(val) {
   if (val == null) return '';
@@ -22,11 +21,9 @@ function truncate(val, max = 120) {
 const HIDDEN_COLS = new Set(['geojson', 'geometry']);
 
 export default function TablePanel({ onClose }) {
-  const pipeline = useStore(s => s.pipeline);
-  const search = useStore(s => s.pipelineSearch);
-  const limit = useStore(s => s.pipelineLimit);
+  // Use the same SQL the pipeline runner compiled (includes FTS resolution)
+  const compiledSql = useStore(s => s.compiledSql);
   const sqlOverride = useStore(s => s.sqlOverride);
-  const drawnBbox = useStore(s => s.pipelineBbox);
 
   const [columns, setColumns] = useState([]);
   const [rows, setRows] = useState([]);
@@ -35,6 +32,8 @@ export default function TablePanel({ onClose }) {
   const [elapsed, setElapsed] = useState(null);
   const [sortCol, setSortCol] = useState(null);
   const [sortAsc, setSortAsc] = useState(true);
+
+  const sql = sqlOverride || compiledSql;
 
   const runQuery = useCallback(async () => {
     const conn = getConn();
@@ -45,9 +44,6 @@ export default function TablePanel({ onClose }) {
     const t0 = performance.now();
 
     try {
-      const bbox = drawnBbox;
-      const compiled = compilePipeline(pipeline, { search, limit, bbox });
-      const sql = sqlOverride || compiled;
       if (!sql) { setLoading(false); return; }
 
       const res = await conn.query(sql);
@@ -66,7 +62,7 @@ export default function TablePanel({ onClose }) {
     } finally {
       setLoading(false);
     }
-  }, [pipeline, search, limit, sqlOverride, drawnBbox]);
+  }, [sql]);
 
   useEffect(() => { runQuery(); }, [runQuery]);
 
