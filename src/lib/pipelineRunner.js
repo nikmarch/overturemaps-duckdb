@@ -52,8 +52,9 @@ export async function runPipeline() {
   // Use drawn bbox (data is loaded for this area)
   const bbox = pipelineBbox;
 
-  // Resolve which tables have FTS indexes for search optimization
   const conn = getConn();
+
+  // Resolve which tables have FTS indexes
   const ftsTables = new Set();
   if (pipelineSearch && conn) {
     const tables = new Set(pipeline.map(n => n.table));

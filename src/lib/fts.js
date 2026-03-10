@@ -26,6 +26,10 @@ export function buildNameFilterSql(tableName, q, { useFts = false } = {}) {
 
 const FTS_PRESENT_CACHE = new Map();
 
+export function clearFtsCache() {
+  FTS_PRESENT_CACHE.clear();
+}
+
 export async function tableHasFts(conn, tableName) {
   if (!conn || !tableName) return false;
   if (FTS_PRESENT_CACHE.has(tableName)) return FTS_PRESENT_CACHE.get(tableName);
@@ -51,7 +55,7 @@ export async function ensureFtsIndex(conn, tableName) {
   // We assume the main table has columns: id, display_name
   try {
     await conn.query(
-      `PRAGMA create_fts_index('${escapeSqlString(tableName)}', 'id', 'display_name');`
+      `PRAGMA create_fts_index('${escapeSqlString(tableName)}', 'id', 'display_name', overwrite=1);`
     );
     // index creation implies helper tables exist
     FTS_PRESENT_CACHE.set(tableName, true);

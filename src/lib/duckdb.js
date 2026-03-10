@@ -1,4 +1,5 @@
 import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
+import { clearFtsCache } from './fts.js';
 
 let db = null;
 let conn = null;
@@ -36,6 +37,7 @@ export function getDb() {
 
 export async function dropAllTables() {
   if (!conn) return;
+  clearFtsCache();
   const tables = (await conn.query('SHOW TABLES')).toArray().map(t => t.name);
   for (const t of tables) {
     if (!t) continue;

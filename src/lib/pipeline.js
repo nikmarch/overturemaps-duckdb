@@ -61,7 +61,6 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
       ...fCols,
       `'${n.key}' AS _source`,
     ];
-    // Push search into each source so FTS index is used per-table
     let where = '';
     if (searchQ) {
       if (ftsTables.has(n.table)) {

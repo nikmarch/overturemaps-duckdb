@@ -59,10 +59,9 @@ describe('compilePipeline', () => {
     expect(sql).toContain('centroid_lat <= 34.1');
   });
 
-  it('uses ILIKE search when no FTS tables', () => {
+  it('uses ILIKE search when no FTS tables provided', () => {
     const sql = compilePipeline([node()], { search: 'cafe' });
     expect(sql).toContain("ILIKE '%cafe%'");
-    // Search should be inside the source subquery
     expect(sql).toContain('FROM "places_place"\n  WHERE');
   });
 
@@ -81,7 +80,7 @@ describe('compilePipeline', () => {
       node({ id: 'p2', type: 'combine', op: 'union', table: 'buildings_building', key: 'buildings/building' }),
     ], {
       search: 'tower',
-      ftsTables: new Set(['places_place']),  // only places has FTS
+      ftsTables: new Set(['places_place']),
     });
     expect(sql).toContain('fts_main_places_place.match_bm25');
     expect(sql).toContain("ILIKE '%tower%'");
