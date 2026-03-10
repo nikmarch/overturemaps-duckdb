@@ -5,7 +5,7 @@ import TablePanel from './components/TablePanel';
 import LoadModal from './components/LoadModal';
 import ProgressOverlay from './components/ProgressOverlay';
 import QueryStatusHud from './components/QueryStatusHud';
-import { loadArea, initSnapviewHistory } from '../lib/controller.js';
+import { loadArea, initSnapviewHistory, restoreFromUrl, initUrlSync } from '../lib/controller.js';
 import { initMap } from '../lib/map.js';
 import { initDuckDB } from '../lib/duckdb.js';
 import { loadReleases } from '../lib/themes.js';
@@ -33,6 +33,11 @@ export default function App() {
 
         await loadReleases();
         await initSnapviewHistory();
+
+        // Restore shared link if URL has ?q= param, otherwise start URL sync
+        const restored = await restoreFromUrl();
+        initUrlSync();
+
         setInitialized(true);
       } catch (e) {
         useStore.setState({ status: { text: `Init error: ${e.message}`, type: 'error' } });

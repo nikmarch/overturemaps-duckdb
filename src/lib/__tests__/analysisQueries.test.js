@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildShowQuery, buildQuery, buildMatchedBQuery } from '../src/lib/analysisQueries.js';
+import { buildShowQuery, buildQuery, buildMatchedBQuery } from '../analysisQueries.js';
 
 describe('buildShowQuery', () => {
   it('returns empty string for no tables', () => {

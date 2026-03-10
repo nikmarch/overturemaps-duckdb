@@ -4,7 +4,8 @@ import { DEFAULT_VIEW, DEFAULT_ZOOM } from './constants.js';
 let map = null;
 
 export function initMap(elementId) {
-  const [z, lat, lon] = (location.hash.slice(1) || '').split('/').map(Number);
+  const hashBase = (location.hash.split('?')[0]).slice(1); // strip ?q=... and #
+  const [z, lat, lon] = (hashBase || '').split('/').map(Number);
   const hasHash = !isNaN(lat) && !isNaN(lon);
 
   map = L.map(elementId).setView(
@@ -15,7 +16,8 @@ export function initMap(elementId) {
 
   map.on('moveend', () => {
     const c = map.getCenter();
-    history.replaceState(null, '', `#${map.getZoom()}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`);
+    const svPart = location.hash.includes('?sv=') ? location.hash.slice(location.hash.indexOf('?sv=')) : '';
+    history.replaceState(null, '', `#${map.getZoom()}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}${svPart}`);
   });
 
   return map;

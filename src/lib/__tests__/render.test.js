@@ -2,13 +2,13 @@ import { describe, it, expect, vi } from 'vitest';
 
 // Mock leaflet and other browser-dependent modules before importing render.js
 vi.mock('leaflet', () => ({ default: {} }));
-vi.mock('../src/lib/map.js', () => ({ getMap: () => null }));
-vi.mock('../src/lib/intersections.js', () => ({
+vi.mock('../map.js', () => ({ getMap: () => null }));
+vi.mock('../intersections.js', () => ({
   intersectionInfoByPointId: new Map(),
   isIntersectionMode: () => false,
 }));
 
-const { clamp, darkenHex } = await import('../src/lib/render.js');
+const { clamp, darkenHex } = await import('../render.js');
 
 describe('clamp', () => {
   it('returns value when within range', () => {
