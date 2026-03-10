@@ -13,6 +13,7 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 8123,
+    allowedHosts: ['zarbazan'],
     proxy: {
       '/api': {
         target: 'https://overture-s3-proxy.zarbazan.workers.dev',

@@ -173,7 +173,7 @@ export default function FilterPipeline() {
               type="range"
               className="pl-limit-slider"
               min="100"
-              max="50000"
+              max="100000"
               step="100"
               defaultValue={limit}
               onChange={e => handleLimitChange(parseInt(e.target.value, 10))}
