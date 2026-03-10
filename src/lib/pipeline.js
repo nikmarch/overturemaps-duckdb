@@ -3,11 +3,15 @@
 // Turns a pipeline node list + options into a single SQL query string.
 // Nodes: { id, type: 'source'|'combine', op?, table, key, distance? }
 //
-// Sources and unions become a UNION ALL CTE ("base").
-// Spatial ops (intersect/within) collect IDs from BOTH sides into a
-// matched_N CTE, then filter base to only participating rows — so you
-// see all geometries involved in the relationship.
-// Exclude keeps the NOT EXISTS semantics (hide rows near the filter table).
+// Two modes:
+//
+// 1. Union-only (no spatial ops): per-source LIMIT in base CTE for balanced
+//    sampling, bbox + search on outer query.
+//
+// 2. Spatial ops (intersect/within/exclude): NO per-source limit in base CTE
+//    so spatial queries run against ALL loaded data (already bbox-bounded from
+//    parquet load). matched_N CTEs collect IDs from BOTH sides of each spatial
+//    relationship. LIMIT only on the final output.
 
 import { THEME_FIELDS } from './constants.js';
 import { escapeSqlString } from './fts.js';
@@ -28,6 +32,8 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
 
   if (sources.length === 0) return '';
 
+  const hasSpatial = spatialFilters.length > 0;
+
   // Auto-include spatial filter tables in sources (for intersect/within)
   // so their geometries appear in the output
   for (const sf of spatialFilters) {
@@ -42,34 +48,47 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
     return Math.max(mx, (THEME_FIELDS[n.key] || []).length);
   }, 0);
 
-  // Per-source limit so each table gets a fair share in the UNION
-  const perSourceLimit = Math.ceil(limit / sources.length);
+  // Per-source limit only for union-only pipelines (balanced sampling).
+  // Spatial pipelines need the full data to find real relationships.
+  const perSourceLimit = hasSpatial ? null : Math.ceil(limit / sources.length);
 
   // Build per-source search clause
   const searchQ = search ? escapeSqlString(search) : '';
 
-  // Build UNION CTE
-  const unionParts = sources.map(n => {
+  // Build column list helper for a source
+  function buildSourceCols(n) {
     const defs = THEME_FIELDS[n.key] || [];
     const fCols = [];
     for (let i = 0; i < maxF; i++) {
       fCols.push(i < defs.length ? `_f${i}` : `NULL AS _f${i}`);
     }
-    const cols = [
+    return [
       'id', 'display_name', 'geometry', 'geom_type',
       'centroid_lon', 'centroid_lat',
       ...fCols,
       `'${n.key}' AS _source`,
     ];
-    let where = '';
+  }
+
+  // Build WHERE conditions for a source subquery
+  function buildSourceWhere(n) {
+    const conds = [];
     if (searchQ) {
       if (ftsTables.has(n.table)) {
-        where = `\n  WHERE fts_main_${n.table}.match_bm25(id, '${searchQ}') IS NOT NULL`;
+        conds.push(`fts_main_${n.table}.match_bm25(id, '${searchQ}') IS NOT NULL`);
       } else {
-        where = `\n  WHERE display_name ILIKE '%${searchQ}%'`;
+        conds.push(`display_name ILIKE '%${searchQ}%'`);
       }
     }
-    return `  (SELECT ${cols.join(', ')}\n  FROM "${n.table}"${where}\n  LIMIT ${perSourceLimit})`;
+    return conds.length ? `\n  WHERE ${conds.join(' AND ')}` : '';
+  }
+
+  // Build UNION CTE
+  const unionParts = sources.map(n => {
+    const cols = buildSourceCols(n);
+    const where = buildSourceWhere(n);
+    const limitClause = perSourceLimit ? `\n  LIMIT ${perSourceLimit}` : '';
+    return `  (SELECT ${cols.join(', ')}\n  FROM "${n.table}"${where}${limitClause})`;
   });
 
   // Output SELECT (convert geometry to GeoJSON here, not in CTE)
@@ -86,7 +105,7 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
   const ctes = [`base AS (\n${unionParts.join('\n  UNION ALL\n')}\n)`];
   const wheres = [];
 
-  // Bbox
+  // Bbox filter on the outer query
   if (bbox) {
     wheres.push(
       `centroid_lon >= ${bbox.xmin} AND centroid_lon <= ${bbox.xmax}` +
@@ -135,9 +154,6 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
       );
     }
   });
-
-  // Text search is pushed into each source subquery (see UNION above)
-  // so that per-table FTS indexes are used when available.
 
   // ── Assemble ──
 
