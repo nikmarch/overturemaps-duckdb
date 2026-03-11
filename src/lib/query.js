@@ -14,21 +14,45 @@ export function buildCacheSelect(parquetCols, key) {
 
   const defs = THEME_FIELDS[key] || [];
   const extraCols = [];
+  const searchableParts = [nameExpr];
+
   for (let i = 0; i < defs.length; i++) {
     if (parquetCols.has(defs[i].col)) {
-      extraCols.push(`CAST(${defs[i].sql} AS VARCHAR) as _f${i}`);
+      const castExpr = `CAST(${defs[i].sql} AS VARCHAR)`;
+      extraCols.push(`${castExpr} as _f${i}`);
+      // Include text-like fields in display_name for FTS indexing
+      if (isSearchableField(defs[i])) {
+        searchableParts.push(`COALESCE(${castExpr}, '')`);
+      }
     }
   }
 
+  // Compose display_name from name + searchable fields for richer FTS
+  const displayNameExpr = searchableParts.length > 1
+    ? `CONCAT_WS(' ', ${searchableParts.join(', ')})`
+    : nameExpr;
+
   return [
     'id',
-    `${nameExpr} as display_name`,
+    `${displayNameExpr} as display_name`,
     'geometry',                                        // native GEOMETRY (WKB)
     'ST_GeometryType(geometry) as geom_type',
     'ST_X(ST_Centroid(geometry)) as centroid_lon',
     'ST_Y(ST_Centroid(geometry)) as centroid_lat',
     ...extraCols,
   ].join(',\n    ');
+}
+
+// Fields worth including in FTS display_name.
+// Skip numeric-only fields (height, floors, depth, confidence, zoom, speed).
+const NUMERIC_LABELS = new Set([
+  'Height (m)', 'Floors', 'Min height', 'Elevation', 'Depth',
+  'Min depth', 'Max depth', 'Confidence', 'Min zoom', 'Max zoom',
+  'Speed limit', 'Population', 'Salt', 'Intermittent',
+]);
+
+function isSearchableField(def) {
+  return !NUMERIC_LABELS.has(def.label);
 }
 
 // Build the SELECT used when reading rows for rendering.
