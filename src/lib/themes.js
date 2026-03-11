@@ -365,6 +365,7 @@ export async function loadTheme(key, snapviewId) {
       state.loadedCount = state.markers.length;
     } else {
       log(`Using cached ${type}...`);
+      await ensureFtsIndex(conn, tableName);
       addLoadedTable(tableName, key);
     }
 
@@ -469,6 +470,7 @@ export async function enableThemeFromCache(key, snapviewBbox, snapviewCap) {
       state.bbox = { ...snapviewBbox };
       state.loadedCount = rowCount;
     }
+    await ensureFtsIndex(conn, tableName);
     addLoadedTable(tableName, key);
     log(`${rowCount.toLocaleString()} ${type} (cached)`, 'success');
   } catch (e) {
