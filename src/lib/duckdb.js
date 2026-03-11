@@ -35,12 +35,15 @@ export function getDb() {
   return db;
 }
 
+// Tables to preserve when dropping all user data tables
+const SYSTEM_TABLES = new Set(['_session', '_load_history']);
+
 export async function dropAllTables() {
   if (!conn) return;
   clearFtsCache();
   const tables = (await conn.query('SHOW TABLES')).toArray().map(t => t.name);
   for (const t of tables) {
-    if (!t) continue;
+    if (!t || SYSTEM_TABLES.has(t)) continue;
     await conn.query(`DROP TABLE IF EXISTS "${t}"`);
   }
 }
