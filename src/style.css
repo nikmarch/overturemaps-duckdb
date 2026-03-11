@@ -585,6 +585,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   min-width: 16px;
   text-align: center;
 }
+.sv-clear-cache-btn {
+  margin-left: auto;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 2px;
+  opacity: 0.4;
+  line-height: 1;
+}
+.sv-clear-cache-btn:hover {
+  opacity: 0.8;
+}
 .snapview-list {
   display: flex;
   flex-direction: column;

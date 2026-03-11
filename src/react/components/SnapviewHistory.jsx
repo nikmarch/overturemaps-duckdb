@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
 import { useStore } from '../../lib/store.js';
-import { deleteSnapview, reloadFromMeta } from '../../lib/controller.js';
+import { deleteSnapview, reloadFromMeta, clearCache } from '../../lib/controller.js';
 import { getThemeColor, rerenderAllEnabled } from '../../lib/themes.js';
 import { getMap } from '../../lib/map.js';
 import AnalysisPanel from './AnalysisPanel.jsx';
@@ -72,6 +72,11 @@ export default function SnapviewHistory() {
           <span className="sv-panel-toggle">{panelOpen ? '▼' : '▶'}</span>
           <span className="sv-panel-title">Snapviews</span>
           <span className="sv-panel-count">{sortedSnapviews.length}</span>
+          <button
+            className="sv-clear-cache-btn"
+            title="Clear all cache"
+            onClick={e => { e.stopPropagation(); clearCache(); }}
+          >&#x1F5D1;</button>
         </div>
 
         {panelOpen && (
