@@ -103,7 +103,12 @@ export async function runPipeline() {
       const fakeState = { key: src, layer: pipelineLayer, markers: [] };
 
       for (let i = 0; i < srcRows.length; i++) {
-        renderFeature(srcRows[i], fakeState, color, defs);
+        try {
+          renderFeature(srcRows[i], fakeState, color, defs);
+        } catch (e) {
+          // Skip individual bad features without breaking the batch
+          console.warn('renderFeature failed for row', srcRows[i]?.id, e?.message);
+        }
         // Yield to browser every 500 rows
         if (i > 0 && i % 500 === 0) {
           await new Promise(r => setTimeout(r, 0));

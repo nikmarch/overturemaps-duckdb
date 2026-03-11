@@ -65,8 +65,10 @@ export function renderFeature(row, state, color, extraFields = []) {
   const isDivisions = state?.key?.startsWith?.('divisions/');
   const intersects = intersectionMode && geomType.includes('POINT') && intersectionInfoByPointId.has(row.id);
 
+  const hasLatLon = row.centroid_lat != null && row.centroid_lon != null;
+
   if (geomType.includes('POINT')) {
-    if (row.centroid_lat && row.centroid_lon) {
+    if (hasLatLon) {
       const latlng = [Number(row.centroid_lat), Number(row.centroid_lon)];
       if (intersects) {
         leafletObj = L.marker(latlng, {
@@ -105,6 +107,14 @@ export function renderFeature(row, state, color, extraFields = []) {
     leafletObj = L.geoJSON(JSON.parse(row.geojson), {
       style: { fillColor: color.fill, color: color.stroke, weight: 1, opacity: 0.6, fillOpacity: 0.12 }
     });
+  }
+
+  // Fallback: if geometry rendering failed but we have centroids, show as point
+  if (!leafletObj && hasLatLon) {
+    leafletObj = L.circleMarker(
+      [Number(row.centroid_lat), Number(row.centroid_lon)],
+      { radius: 3, fillColor: color.fill, color: color.stroke, weight: 1, fillOpacity: 0.7 },
+    );
   }
 
   if (leafletObj) {
