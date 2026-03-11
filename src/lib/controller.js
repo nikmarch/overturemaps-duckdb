@@ -394,7 +394,7 @@ export async function restoreFromUrl() {
   const decoded = await decodeStateFromUrl();
   if (!decoded) return false;
 
-  const { themeKeys, sql, search, limit } = decoded;
+  const { themeKeys, search, limit } = decoded;
   const bbox = decoded.bbox || getBbox();
 
   useStore.setState({ status: { text: 'Restoring shared link...', type: 'loading' } });
@@ -407,17 +407,17 @@ export async function restoreFromUrl() {
     if (map) map.fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [20, 20] });
   }
 
-  // Load themes — this creates DuckDB tables and auto-adds pipeline nodes
+  // Load themes — this creates DuckDB tables, builds FTS indexes,
+  // and auto-adds pipeline nodes
   if (themeKeys.length > 0) {
     await loadArea(themeKeys, bbox);
     await waitForTables(themeKeys.map(k => k.replace('/', '_')));
   }
 
-  // Apply the shared SQL as override + search/limit
+  // Apply search/limit — pipeline runner will recompile with proper FTS detection
   useStore.setState({
     pipelineSearch: search,
     pipelineLimit: limit,
-    ...(sql ? { sqlOverride: sql } : {}),
   });
 
   return true;
