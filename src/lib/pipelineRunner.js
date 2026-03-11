@@ -11,7 +11,7 @@ import { compilePipeline } from './pipeline.js';
 import { getThemeColor } from './themes.js';
 import { renderFeature, zOrderBySize } from './render.js';
 import { THEME_FIELDS } from './constants.js';
-import { tableHasFts } from './fts.js';
+import { tableHasFts, clearFtsCache } from './fts.js';
 
 let pipelineLayer = null;
 let debounceTimer = null;
@@ -86,7 +86,22 @@ export async function runPipeline() {
 
   const t0 = performance.now();
   try {
-    const res = await conn.query(sql);
+    let res;
+    try {
+      res = await conn.query(sql);
+    } catch (e) {
+      // If FTS function missing, clear cache and recompile without FTS
+      if (e.message?.includes('match_bm25')) {
+        clearFtsCache();
+        const fallbackSql = sqlOverride || compilePipeline(pipeline, {
+          search: pipelineSearch, limit: pipelineLimit, bbox, ftsTables: new Set(),
+        });
+        useStore.setState({ compiledSql: fallbackSql });
+        res = await conn.query(sqlOverride || fallbackSql);
+      } else {
+        throw e;
+      }
+    }
     const rows = res.toArray();
 
     // Group by _source and render with appropriate colors

@@ -31,7 +31,7 @@ describe('urlState', () => {
   const hasCompression = typeof globalThis.CompressionStream !== 'undefined';
 
   describe('encodeStateToUrl / decodeStateFromUrl round-trip', () => {
-    it.skipIf(!hasCompression)('round-trips sv with sql, bbox, and theme keys', async () => {
+    it.skipIf(!hasCompression)('round-trips sv with bbox, search, limit, and theme keys', async () => {
       mockStore._setState({
         pipeline: [
           { id: 'p1', type: 'source', table: 'places_place', key: 'places/place' },
@@ -55,12 +55,11 @@ describe('urlState', () => {
       expect(decoded).not.toBeNull();
       expect(decoded.themeKeys).toEqual(['places/place', 'buildings/building']);
       expect(decoded.bbox).toEqual({ xmin: -118.3, xmax: -118.2, ymin: 34.0, ymax: 34.1 });
-      expect(decoded.sql).toContain('places_place');
       expect(decoded.search).toBe('cafe');
       expect(decoded.limit).toBe(5000);
     });
 
-    it.skipIf(!hasCompression)('uses sqlOverride when present', async () => {
+    it.skipIf(!hasCompression)('does not include SQL in encoded payload', async () => {
       mockStore._setState({
         pipeline: [{ id: 'p1', type: 'source', table: 'places_place', key: 'places/place' }],
         pipelineSearch: '',
@@ -75,7 +74,8 @@ describe('urlState', () => {
       globalThis.location.hash = url;
 
       const decoded = await urlState.decodeStateFromUrl();
-      expect(decoded.sql).toBe('SELECT id FROM places_place LIMIT 10');
+      // SQL is not shared — pipeline recompiles on restore
+      expect(decoded.sql).toBeUndefined();
     });
 
     it.skipIf(!hasCompression)('skips encoding when pipeline is empty', async () => {

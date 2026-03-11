@@ -27,7 +27,7 @@ import { saveSnapviewMeta, loadAllSnapviewMeta, deleteSnapviewMeta, loadTableCac
 import { getConn, getDb } from './duckdb.js';
 import { ensureFtsIndex } from './fts.js';
 import { decodeStateFromUrl, initUrlSync } from './urlState.js';
-import { showBboxRect } from './drawBbox.js';
+import { showBboxRect, clearDrawnBbox } from './drawBbox.js';
 
 export { onReleaseChange as setRelease };
 export { toggleTheme };
@@ -316,11 +316,13 @@ export async function clearCache() {
   activeSnapviewId = null;
   useStore.setState({ activeSnapview: null });
 
+  clearDrawnBbox();
   clearSnapviews();
   clearIntersectionState();
   await dropAllTables();
   await clearAllTableCache();
   clearAllThemes();
+  useStore.setState({ pipeline: [], loadedTables: [], pipelineResult: null, pipelineRows: null, compiledSql: '', sqlOverride: null });
 
   const requests = Object.keys(themeState).map((key) => {
     const [theme, type] = key.split('/');
@@ -394,7 +396,7 @@ export async function restoreFromUrl() {
   const decoded = await decodeStateFromUrl();
   if (!decoded) return false;
 
-  const { themeKeys, sql, search, limit } = decoded;
+  const { themeKeys, search, limit } = decoded;
   const bbox = decoded.bbox || getBbox();
 
   useStore.setState({ status: { text: 'Restoring shared link...', type: 'loading' } });
@@ -407,17 +409,17 @@ export async function restoreFromUrl() {
     if (map) map.fitBounds([[bbox.ymin, bbox.xmin], [bbox.ymax, bbox.xmax]], { padding: [20, 20] });
   }
 
-  // Load themes — this creates DuckDB tables and auto-adds pipeline nodes
+  // Load themes — this creates DuckDB tables, builds FTS indexes,
+  // and auto-adds pipeline nodes
   if (themeKeys.length > 0) {
     await loadArea(themeKeys, bbox);
     await waitForTables(themeKeys.map(k => k.replace('/', '_')));
   }
 
-  // Apply the shared SQL as override + search/limit
+  // Apply search/limit — pipeline runner will recompile with proper FTS detection
   useStore.setState({
     pipelineSearch: search,
     pipelineLimit: limit,
-    ...(sql ? { sqlOverride: sql } : {}),
   });
 
   return true;

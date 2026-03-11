@@ -4,9 +4,9 @@
 //   #zoom/lat/lon?sv=<compressed>
 //
 // The sv (snapview) payload contains:
-//   { t: theme keys, b: bbox, q: SQL query, s: search, l: limit }
+//   { t: theme keys, b: bbox, s: search, l: limit }
 //
-// On restore: loads themes for bbox, waits for tables, runs the SQL.
+// On restore: loads themes for bbox, waits for tables, recompiles pipeline.
 
 import { useStore } from './store.js';
 
@@ -95,10 +95,6 @@ function buildSvPayload() {
   // Bbox (required to know what area to load)
   if (s.pipelineBbox) sv.b = s.pipelineBbox;
 
-  // The SQL to run — prefer sqlOverride, fall back to compiledSql
-  const sql = s.sqlOverride || s.compiledSql;
-  if (sql) sv.q = sql;
-
   // Search + limit only if non-default
   if (s.pipelineSearch) sv.s = s.pipelineSearch;
   if (s.pipelineLimit !== 3000) sv.l = s.pipelineLimit;
@@ -135,7 +131,6 @@ export async function decodeStateFromUrl() {
     return {
       themeKeys: sv.t || [],
       bbox: sv.b || null,
-      sql: sv.q || null,
       search: sv.s || '',
       limit: sv.l || 3000,
     };

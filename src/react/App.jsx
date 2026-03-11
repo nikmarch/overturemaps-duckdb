@@ -5,7 +5,7 @@ import TablePanel from './components/TablePanel';
 import LoadModal from './components/LoadModal';
 import ProgressOverlay from './components/ProgressOverlay';
 import QueryStatusHud from './components/QueryStatusHud';
-import { loadArea, initSnapviewHistory, restoreFromUrl, initUrlSync } from '../lib/controller.js';
+import { loadArea, initSnapviewHistory, restoreFromUrl, initUrlSync, clearCache } from '../lib/controller.js';
 import { initMap } from '../lib/map.js';
 import { initDuckDB } from '../lib/duckdb.js';
 import { initSessionTable, restoreSession, initSessionSync } from '../lib/sessionState.js';
@@ -55,10 +55,10 @@ export default function App() {
 
   const handleDraw = useCallback(() => {
     setDrawing(true);
-    startDraw((bbox) => {
-      setDrawing(false);
-      setModalOpen(true);
-    });
+    startDraw(
+      (bbox) => { setDrawing(false); setModalOpen(true); },
+      () => { setDrawing(false); },
+    );
   }, []);
 
   function handleLoad(keys) {
@@ -81,13 +81,23 @@ export default function App() {
           Table
         </button>
       )}
-      <button
-        className="load-area-btn"
-        onClick={handleDraw}
-        title="Draw rectangle to select area and load themes"
-      >
-        {drawing ? 'Drawing...' : 'Select Area'}
-      </button>
+      <div className="bottom-right-btns">
+        <button
+          className="clear-cache-btn"
+          onClick={clearCache}
+          title="Clear all cached data"
+        >
+          &#x1F5D1;
+        </button>
+        <button
+          className="load-area-btn"
+          onClick={handleDraw}
+          disabled={drawing}
+          title="Draw rectangle to select area and load themes"
+        >
+          {drawing ? 'Drawing...' : 'Select Area'}
+        </button>
+      </div>
       <LoadModal open={modalOpen} onClose={() => setModalOpen(false)} onLoad={handleLoad} />
       <FilterPipeline />
       {tableOpen && <TablePanel onClose={() => setTableOpen(false)} />}
