@@ -133,6 +133,23 @@ describe('compilePipeline', () => {
     const sql = compilePipeline([node()], { search: '' });
     expect(sql).not.toContain('ILIKE');
     expect(sql).not.toContain('match_bm25');
+    expect(sql).not.toContain('_score');
+    expect(sql).not.toContain('ORDER BY');
+  });
+
+  it('includes _score column and ORDER BY when searching with FTS', () => {
+    const sql = compilePipeline([node()], {
+      search: 'cafe',
+      ftsTables: new Set(['places_place']),
+    });
+    expect(sql).toContain('_score');
+    expect(sql).toContain('ORDER BY _score ASC');
+  });
+
+  it('includes _score as NULL for non-FTS search', () => {
+    const sql = compilePipeline([node()], { search: 'cafe' });
+    expect(sql).toContain('NULL AS _score');
+    expect(sql).toContain('ORDER BY _score ASC');
   });
 
   // ── Spatial operations ──

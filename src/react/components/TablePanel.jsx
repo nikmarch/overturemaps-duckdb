@@ -32,6 +32,17 @@ export default function TablePanel({ onClose }) {
     return Object.keys(rows[0]).filter(c => !HIDDEN_COLS.has(c));
   }, [rows]);
 
+  // Default sort by _score when search results arrive
+  const hasScore = columns.includes('_score');
+  useEffect(() => {
+    if (hasScore && sortCol !== '_score') {
+      setSortCol('_score');
+      setSortAsc(true);
+    } else if (!hasScore && sortCol === '_score') {
+      setSortCol(null);
+    }
+  }, [hasScore]);
+
   // Close on Escape
   useEffect(() => {
     function onKey(e) { if (e.key === 'Escape') onClose(); }
