@@ -20,21 +20,22 @@ export function buildCacheSelect(parquetCols, key) {
     if (parquetCols.has(defs[i].col)) {
       const castExpr = `CAST(${defs[i].sql} AS VARCHAR)`;
       extraCols.push(`${castExpr} as _f${i}`);
-      // Include text-like fields in display_name for FTS indexing
+      // Include text-like fields in search_name for FTS indexing
       if (isSearchableField(defs[i])) {
         searchableParts.push(`COALESCE(${castExpr}, '')`);
       }
     }
   }
 
-  // Compose display_name from name + searchable fields for richer FTS
-  const displayNameExpr = searchableParts.length > 1
+  // search_name: composed from name + searchable fields for richer FTS
+  const searchNameExpr = searchableParts.length > 1
     ? `CONCAT_WS(' ', ${searchableParts.join(', ')})`
     : nameExpr;
 
   return [
     'id',
-    `${displayNameExpr} as display_name`,
+    `${nameExpr} as display_name`,
+    `${searchNameExpr} as search_name`,
     'geometry',                                        // native GEOMETRY (WKB)
     'ST_GeometryType(geometry) as geom_type',
     'ST_X(ST_Centroid(geometry)) as centroid_lon',

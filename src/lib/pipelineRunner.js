@@ -9,7 +9,7 @@ import { getConn } from './duckdb.js';
 import { getMap } from './map.js';
 import { compilePipeline } from './pipeline.js';
 import { getThemeColor } from './themes.js';
-import { renderFeature } from './render.js';
+import { renderFeature, zOrderBySize } from './render.js';
 import { THEME_FIELDS } from './constants.js';
 import { tableHasFts } from './fts.js';
 
@@ -116,6 +116,9 @@ export async function runPipeline() {
       }
       totalRendered += fakeState.markers.length;
     }
+
+    // Sort polygons: largest to back, smallest to front (clickable)
+    zOrderBySize(pipelineLayer);
 
     const durationMs = Math.round(performance.now() - t0);
     const fmtMs = durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`;

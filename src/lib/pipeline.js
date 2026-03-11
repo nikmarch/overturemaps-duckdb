@@ -63,7 +63,7 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
       fCols.push(i < defs.length ? `_f${i}` : `NULL AS _f${i}`);
     }
     return [
-      'id', 'display_name', 'geometry', 'geom_type',
+      'id', 'display_name', 'search_name', 'geometry', 'geom_type',
       'centroid_lon', 'centroid_lat',
       ...fCols,
       `'${n.key}' AS _source`,
@@ -77,7 +77,7 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
       if (ftsTables.has(n.table)) {
         conds.push(`fts_main_${n.table}.match_bm25(id, '${searchQ}') IS NOT NULL`);
       } else {
-        conds.push(`display_name ILIKE '%${searchQ}%'`);
+        conds.push(`search_name ILIKE '%${searchQ}%'`);
       }
     }
     return conds.length ? `\n  WHERE ${conds.join(' AND ')}` : '';
@@ -93,7 +93,7 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
 
   // Output SELECT (convert geometry to GeoJSON here, not in CTE)
   const outCols = [
-    'id', 'display_name',
+    'id', 'display_name', 'search_name',
     'ST_AsGeoJSON(geometry) AS geojson',
     'geom_type', 'centroid_lon', 'centroid_lat',
   ];

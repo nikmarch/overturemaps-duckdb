@@ -11,14 +11,14 @@ describe('bboxFilter', () => {
 });
 
 describe('buildCacheSelect', () => {
-  it('uses names.primary when names column exists and no extra fields', () => {
+  it('uses names.primary for display_name when names column exists', () => {
     const cols = new Set(['id', 'names', 'geometry']);
     const sql = buildCacheSelect(cols, 'unknown/type');
     expect(sql).toContain("names.primary");
     expect(sql).toContain('as display_name');
   });
 
-  it('falls back to name column', () => {
+  it('falls back to name column for display_name', () => {
     const cols = new Set(['id', 'name', 'geometry']);
     const sql = buildCacheSelect(cols, 'unknown/type');
     expect(sql).toContain("CAST(name AS VARCHAR)");
@@ -48,44 +48,62 @@ describe('buildCacheSelect', () => {
     expect(sql).toContain('ST_Y(ST_Centroid(geometry)) as centroid_lat');
   });
 
-  // ── Enriched display_name for FTS ──
+  it('has separate display_name and search_name columns', () => {
+    const cols = new Set(['id', 'names', 'geometry']);
+    const sql = buildCacheSelect(cols, 'unknown/type');
+    expect(sql).toContain('as display_name');
+    expect(sql).toContain('as search_name');
+  });
 
-  it('composes display_name with searchable fields for addresses', () => {
+  // ── search_name composition for FTS ──
+
+  it('composes search_name with searchable fields for addresses', () => {
     const cols = new Set(['id', 'geometry', 'number', 'street', 'postcode', 'country']);
     const sql = buildCacheSelect(cols, 'addresses/address');
-    expect(sql).toContain('CONCAT_WS');
-    expect(sql).toContain('as display_name');
-    // Address fields should be in the composed name
-    expect(sql).toMatch(/CAST\(number AS VARCHAR\)/);
-    expect(sql).toMatch(/CAST\(street AS VARCHAR\)/);
-    expect(sql).toMatch(/CAST\(postcode AS VARCHAR\)/);
-    expect(sql).toMatch(/CAST\(country AS VARCHAR\)/);
+    // search_name should use CONCAT_WS
+    const searchMatch = sql.match(/CONCAT_WS\(.+?\) as search_name/s)?.[0] || '';
+    expect(searchMatch).toContain('CONCAT_WS');
+    expect(searchMatch).toMatch(/CAST\(number AS VARCHAR\)/);
+    expect(searchMatch).toMatch(/CAST\(street AS VARCHAR\)/);
+    expect(searchMatch).toMatch(/CAST\(postcode AS VARCHAR\)/);
+    expect(searchMatch).toMatch(/CAST\(country AS VARCHAR\)/);
+    // display_name should be plain name (empty for addresses with no names col)
+    expect(sql).toMatch(/''\s+as display_name/);
   });
 
-  it('composes display_name with category and brand for places, excludes address/website/phone', () => {
+  it('composes search_name with category and brand for places, excludes address/website/phone', () => {
     const cols = new Set(['id', 'names', 'geometry', 'categories', 'brand', 'addresses', 'websites', 'phones', 'confidence']);
     const sql = buildCacheSelect(cols, 'places/place');
-    expect(sql).toContain('CONCAT_WS');
-    // Category and brand are searchable
-    expect(sql).toMatch(/categories\.primary/);
-    expect(sql).toMatch(/brand\.names\.primary/);
-    // Address, website, phone are noise for FTS — excluded from CONCAT_WS
-    const concatMatch = sql.match(/CONCAT_WS\(.+?\) as display_name/s)?.[0] || '';
-    expect(concatMatch).not.toContain('addresses');
-    expect(concatMatch).not.toContain('websites');
-    expect(concatMatch).not.toContain('phones');
+    // search_name has CONCAT_WS with category and brand
+    const searchMatch = sql.match(/CONCAT_WS\(.+?\) as search_name/s)?.[0] || '';
+    expect(searchMatch).toMatch(/categories\.primary/);
+    expect(searchMatch).toMatch(/brand\.names\.primary/);
+    // Address, website, phone excluded from search_name
+    expect(searchMatch).not.toContain('addresses');
+    expect(searchMatch).not.toContain('websites');
+    expect(searchMatch).not.toContain('phones');
+    // display_name is just the name
+    expect(sql).toMatch(/names\.primary.+?as display_name/s);
   });
 
-  it('skips numeric fields from display_name composition', () => {
+  it('skips numeric fields from search_name composition', () => {
     const cols = new Set(['id', 'names', 'geometry', 'height', 'num_floors', 'subtype', 'class']);
     const sql = buildCacheSelect(cols, 'buildings/building');
-    expect(sql).toContain('CONCAT_WS');
-    // Subtype and class are searchable
-    expect(sql).toMatch(/CAST\(subtype AS VARCHAR\)/);
-    expect(sql).toMatch(/CAST\(class AS VARCHAR\)/);
-    // The CONCAT_WS should not include height or num_floors
-    const concatMatch = sql.match(/CONCAT_WS\([^)]+\)/);
-    expect(concatMatch[0]).not.toContain('height');
-    expect(concatMatch[0]).not.toContain('num_floors');
+    // search_name should include subtype and class
+    const searchMatch = sql.match(/CONCAT_WS\(.+?\) as search_name/s)?.[0] || '';
+    expect(searchMatch).toMatch(/CAST\(subtype AS VARCHAR\)/);
+    expect(searchMatch).toMatch(/CAST\(class AS VARCHAR\)/);
+    // search_name should not include height or num_floors
+    expect(searchMatch).not.toContain('height');
+    expect(searchMatch).not.toContain('num_floors');
+  });
+
+  it('display_name is clean name without extra fields', () => {
+    const cols = new Set(['id', 'names', 'geometry', 'categories', 'confidence']);
+    const sql = buildCacheSelect(cols, 'places/place');
+    // display_name should be just the name expression, not CONCAT_WS
+    const displayMatch = sql.match(/(.+?) as display_name/)?.[1]?.trim() || '';
+    expect(displayMatch).not.toContain('CONCAT_WS');
+    expect(displayMatch).toContain('names.primary');
   });
 });
