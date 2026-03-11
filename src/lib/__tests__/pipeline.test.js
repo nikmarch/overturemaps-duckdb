@@ -143,13 +143,13 @@ describe('compilePipeline', () => {
       ftsTables: new Set(['places_place']),
     });
     expect(sql).toContain('_score');
-    expect(sql).toContain('ORDER BY _score ASC');
+    expect(sql).toContain('ORDER BY _score DESC');
   });
 
   it('includes _score as NULL for non-FTS search', () => {
     const sql = compilePipeline([node()], { search: 'cafe' });
     expect(sql).toContain('NULL AS _score');
-    expect(sql).toContain('ORDER BY _score ASC');
+    expect(sql).toContain('ORDER BY _score DESC');
   });
 
   // ── Spatial operations ──

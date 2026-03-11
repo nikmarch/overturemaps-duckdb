@@ -37,7 +37,7 @@ export default function TablePanel({ onClose }) {
   useEffect(() => {
     if (hasScore && sortCol !== '_score') {
       setSortCol('_score');
-      setSortAsc(true);
+      setSortAsc(false);
     } else if (!hasScore && sortCol === '_score') {
       setSortCol(null);
     }

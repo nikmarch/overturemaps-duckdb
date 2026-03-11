@@ -174,7 +174,7 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
     sql += `\nWHERE ${wheres.join('\n  AND ')}`;
   }
 
-  if (searchQ) sql += `\nORDER BY _score ASC`;
+  if (searchQ) sql += `\nORDER BY _score DESC`;
   sql += `\nLIMIT ${limit}`;
 
   return sql;

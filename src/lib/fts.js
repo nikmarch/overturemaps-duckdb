@@ -86,7 +86,7 @@ export async function ftsSearchTable(conn, tableName, q, limit = 10) {
         '${escapeSqlString(tableName)}' AS source_table
       FROM "${tableName}"
       WHERE fts_main_${tableName}.match_bm25(id, '${qq}') IS NOT NULL
-      ORDER BY _score ASC
+      ORDER BY _score DESC
       LIMIT ${Number(limit) || 10}
     `)).toArray();
     return rows;
