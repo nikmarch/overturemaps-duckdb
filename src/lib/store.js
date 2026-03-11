@@ -26,6 +26,7 @@ export const useStore = create(subscribeWithSelector((_set, _get) => ({
   compiledSql: '',        // auto-compiled SQL from pipeline
   sqlOverride: null,      // user-edited SQL (overrides compiledSql when set)
   pipelineResult: null,   // { count, durationMs } or { error }
+  pipelineRows: null,     // raw result rows from last pipeline query (shared by map + table)
   pipelineRunning: false,
   pipelineBbox: null,     // null = use viewport, { xmin, xmax, ymin, ymax } = drawn rectangle
   loadedTables: [],       // ['places_place', 'buildings_building', ...]
