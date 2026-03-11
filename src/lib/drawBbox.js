@@ -12,6 +12,7 @@ let rectLayer = null;
 let startLatLng = null;
 let previewRect = null;
 let drawCallback = null;
+let cancelCallback = null;
 
 const RECT_STYLE = {
   color: '#1a73e8',
@@ -33,10 +34,13 @@ export function isDrawActive() {
   return active;
 }
 
-export function startDraw(onComplete) {
+export function startDraw(onComplete, onCancel) {
   const map = getMap();
-  if (!map || active) return;
+  if (!map) return;
+  // If already drawing, stop first so we can restart cleanly
+  if (active) stopDraw();
   drawCallback = onComplete || null;
+  cancelCallback = onCancel || null;
 
   // Clear previous rectangle
   if (rectLayer) { rectLayer.remove(); rectLayer = null; }
@@ -62,6 +66,7 @@ export function stopDraw() {
 
   active = false;
   startLatLng = null;
+  cancelCallback = null;
   map.getContainer().classList.remove('map-drawing');
 
   map.dragging.enable();
@@ -165,6 +170,8 @@ function onMouseUp(e) {
 function onKeyDown(e) {
   if (e.key === 'Escape') {
     if (previewRect) { previewRect.remove(); previewRect = null; }
+    const cb = cancelCallback;
     stopDraw();
+    if (cb) cb();
   }
 }

@@ -55,10 +55,10 @@ export default function App() {
 
   const handleDraw = useCallback(() => {
     setDrawing(true);
-    startDraw((bbox) => {
-      setDrawing(false);
-      setModalOpen(true);
-    });
+    startDraw(
+      (bbox) => { setDrawing(false); setModalOpen(true); },
+      () => { setDrawing(false); },
+    );
   }, []);
 
   function handleLoad(keys) {
@@ -92,6 +92,7 @@ export default function App() {
         <button
           className="load-area-btn"
           onClick={handleDraw}
+          disabled={drawing}
           title="Draw rectangle to select area and load themes"
         >
           {drawing ? 'Drawing...' : 'Select Area'}
