@@ -43,16 +43,18 @@ export function buildCacheSelect(parquetCols, key) {
   ].join(',\n    ');
 }
 
-// Fields worth including in FTS display_name.
-// Skip numeric-only fields (height, floors, depth, confidence, zoom, speed).
-const NUMERIC_LABELS = new Set([
+// Fields to EXCLUDE from FTS display_name composition.
+// Numeric fields aren't useful for text search. Address/URL/phone on places
+// add noise — use the addresses/address theme for location-based search.
+const EXCLUDE_LABELS = new Set([
   'Height (m)', 'Floors', 'Min height', 'Elevation', 'Depth',
   'Min depth', 'Max depth', 'Confidence', 'Min zoom', 'Max zoom',
   'Speed limit', 'Population', 'Salt', 'Intermittent',
+  'Address', 'Website', 'Phone',
 ]);
 
 function isSearchableField(def) {
-  return !NUMERIC_LABELS.has(def.label);
+  return !EXCLUDE_LABELS.has(def.label);
 }
 
 // Build the SELECT used when reading rows for rendering.

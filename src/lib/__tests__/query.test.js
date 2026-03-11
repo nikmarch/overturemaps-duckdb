@@ -62,13 +62,18 @@ describe('buildCacheSelect', () => {
     expect(sql).toMatch(/CAST\(country AS VARCHAR\)/);
   });
 
-  it('composes display_name with category and brand for places', () => {
+  it('composes display_name with category and brand for places, excludes address/website/phone', () => {
     const cols = new Set(['id', 'names', 'geometry', 'categories', 'brand', 'addresses', 'websites', 'phones', 'confidence']);
     const sql = buildCacheSelect(cols, 'places/place');
     expect(sql).toContain('CONCAT_WS');
-    // Category and brand are searchable, confidence is not
+    // Category and brand are searchable
     expect(sql).toMatch(/categories\.primary/);
     expect(sql).toMatch(/brand\.names\.primary/);
+    // Address, website, phone are noise for FTS — excluded from CONCAT_WS
+    const concatMatch = sql.match(/CONCAT_WS\(.+?\) as display_name/s)?.[0] || '';
+    expect(concatMatch).not.toContain('addresses');
+    expect(concatMatch).not.toContain('websites');
+    expect(concatMatch).not.toContain('phones');
   });
 
   it('skips numeric fields from display_name composition', () => {
