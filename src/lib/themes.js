@@ -3,7 +3,7 @@ import { PROXY, PALETTE_16, THEME_COLORS, DEFAULT_COLOR } from './constants.js';
 import { getConn, getDb } from './duckdb.js';
 import { getMap, getBbox, bboxContains } from './map.js';
 import { bboxFilter, buildCacheSelect, getFieldsForTable } from './query.js';
-import { renderFeature } from './render.js';
+import { renderFeature, zOrderBySize } from './render.js';
 import { darkenHex } from './render.js';
 import { isIntersectionMode, recomputeIntersections } from './intersections.js';
 import {
@@ -164,6 +164,7 @@ async function rerenderThemeFromCache(key, overrideCap) {
       LIMIT ${renderLimit}
     `)).toArray();
     await renderBatched(rows, state, color, fields.extraFields);
+    zOrderBySize(state.layer);
   } catch (e) {
     console.error(e);
   }
@@ -530,6 +531,7 @@ export async function rerenderAllEnabled(overrideCap) {
         LIMIT ${renderLimit}
       `)).toArray();
       await renderBatched(rows, state, color, fields.extraFields);
+      zOrderBySize(state.layer);
     } catch (e) {
       console.error(e);
     }

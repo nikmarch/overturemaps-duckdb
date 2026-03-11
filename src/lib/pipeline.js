@@ -63,29 +63,38 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
       fCols.push(i < defs.length ? `_f${i}` : `NULL AS _f${i}`);
     }
     return [
-      'id', 'display_name', 'geometry', 'geom_type',
+      'id', 'display_name', 'search_name', 'geometry', 'geom_type',
       'centroid_lon', 'centroid_lat',
       ...fCols,
       `'${n.key}' AS _source`,
     ];
   }
 
-  // Build WHERE conditions for a source subquery
+  // Build WHERE conditions and optional score column for a source subquery
   function buildSourceWhere(n) {
     const conds = [];
     if (searchQ) {
       if (ftsTables.has(n.table)) {
         conds.push(`fts_main_${n.table}.match_bm25(id, '${searchQ}') IS NOT NULL`);
       } else {
-        conds.push(`display_name ILIKE '%${searchQ}%'`);
+        conds.push(`search_name ILIKE '%${searchQ}%'`);
       }
     }
     return conds.length ? `\n  WHERE ${conds.join(' AND ')}` : '';
   }
 
+  // Build score expression for a source (FTS score or NULL)
+  function buildScoreExpr(n) {
+    if (searchQ && ftsTables.has(n.table)) {
+      return `fts_main_${n.table}.match_bm25(id, '${searchQ}') AS _score`;
+    }
+    return 'NULL AS _score';
+  }
+
   // Build UNION CTE
   const unionParts = sources.map(n => {
     const cols = buildSourceCols(n);
+    if (searchQ) cols.push(buildScoreExpr(n));
     const where = buildSourceWhere(n);
     const limitClause = perSourceLimit ? `\n  LIMIT ${perSourceLimit}` : '';
     return `  (SELECT ${cols.join(', ')}\n  FROM "${n.table}"${where}${limitClause})`;
@@ -93,12 +102,13 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
 
   // Output SELECT (convert geometry to GeoJSON here, not in CTE)
   const outCols = [
-    'id', 'display_name',
+    'id', 'display_name', 'search_name',
     'ST_AsGeoJSON(geometry) AS geojson',
     'geom_type', 'centroid_lon', 'centroid_lat',
   ];
   for (let i = 0; i < maxF; i++) outCols.push(`_f${i}`);
   outCols.push('_source');
+  if (searchQ) outCols.push('_score');
 
   // ── Build CTEs and WHERE clauses ──
 
@@ -164,6 +174,7 @@ export function compilePipeline(nodes, { search = '', limit = 3000, bbox = null,
     sql += `\nWHERE ${wheres.join('\n  AND ')}`;
   }
 
+  if (searchQ) sql += `\nORDER BY _score DESC`;
   sql += `\nLIMIT ${limit}`;
 
   return sql;

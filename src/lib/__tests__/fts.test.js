@@ -33,7 +33,7 @@ describe('buildNameFilterSql', () => {
 
   it('builds ILIKE clause by default', () => {
     const sql = buildNameFilterSql('places_place', 'cafe');
-    expect(sql).toBe("display_name ILIKE '%cafe%'");
+    expect(sql).toBe("search_name ILIKE '%cafe%'");
   });
 
   it('builds FTS clause when useFts is true', () => {

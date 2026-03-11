@@ -8,6 +8,7 @@ import QueryStatusHud from './components/QueryStatusHud';
 import { loadArea, initSnapviewHistory, restoreFromUrl, initUrlSync } from '../lib/controller.js';
 import { initMap } from '../lib/map.js';
 import { initDuckDB } from '../lib/duckdb.js';
+import { initSessionTable, restoreSession, initSessionSync } from '../lib/sessionState.js';
 import { loadReleases } from '../lib/themes.js';
 import { initSnapviewsLayer } from '../lib/snapviews.js';
 import { initPipelineRunner } from '../lib/pipelineRunner.js';
@@ -31,12 +32,17 @@ export default function App() {
         initSnapviewsLayer();
         initPipelineRunner();
 
+        // Set up DuckDB session table and restore persisted state
+        await initSessionTable();
+        const sessionRestored = await restoreSession();
+
         await loadReleases();
         await initSnapviewHistory();
 
-        // Restore shared link if URL has ?q= param, otherwise start URL sync
-        const restored = await restoreFromUrl();
+        // URL takes priority over session state
+        const urlRestored = await restoreFromUrl();
         initUrlSync();
+        initSessionSync();
 
         setInitialized(true);
       } catch (e) {

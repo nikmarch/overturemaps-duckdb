@@ -22,14 +22,21 @@ function boundsAreaDeg2(bounds) {
   return Math.abs((ne.lat - sw.lat) * (ne.lng - sw.lng));
 }
 
-function applyZOrderBySize(layer) {
-  try {
-    const b = layer.getBounds?.();
-    if (!b) return;
-    const a = boundsAreaDeg2(b);
-    if (a > 5) layer.bringToBack?.();
-    else layer.bringToFront?.();
-  } catch { /* ignore */ }
+// Sort polygon layers so smaller geometries render on top (clickable).
+// Call after all features in a layer group have been added.
+export function zOrderBySize(layerGroup) {
+  const items = [];
+  layerGroup.eachLayer(layer => {
+    try {
+      const b = layer.getBounds?.();
+      if (b) items.push({ layer, area: boundsAreaDeg2(b) });
+    } catch { /* ignore */ }
+  });
+  // Sort largest-first, then bring to back in that order → smallest ends up on top
+  items.sort((a, b) => b.area - a.area);
+  for (const { layer } of items) {
+    try { layer.bringToBack(); } catch { /* ignore */ }
+  }
 }
 
 function attachZoomLink(layer, opts = {}) {
@@ -65,8 +72,10 @@ export function renderFeature(row, state, color, extraFields = []) {
   const isDivisions = state?.key?.startsWith?.('divisions/');
   const intersects = intersectionMode && geomType.includes('POINT') && intersectionInfoByPointId.has(row.id);
 
+  const hasLatLon = row.centroid_lat != null && row.centroid_lon != null;
+
   if (geomType.includes('POINT')) {
-    if (row.centroid_lat && row.centroid_lon) {
+    if (hasLatLon) {
       const latlng = [Number(row.centroid_lat), Number(row.centroid_lon)];
       if (intersects) {
         leafletObj = L.marker(latlng, {
@@ -107,6 +116,14 @@ export function renderFeature(row, state, color, extraFields = []) {
     });
   }
 
+  // Fallback: if geometry rendering failed but we have centroids, show as point
+  if (!leafletObj && hasLatLon) {
+    leafletObj = L.circleMarker(
+      [Number(row.centroid_lat), Number(row.centroid_lon)],
+      { radius: 3, fillColor: color.fill, color: color.stroke, weight: 1, fillOpacity: 0.7 },
+    );
+  }
+
   if (leafletObj) {
     const name = row.display_name || row.id || '?';
     const [_theme, _type] = (state.key || '').split('/');
@@ -133,10 +150,6 @@ export function renderFeature(row, state, color, extraFields = []) {
     leafletObj.bindPopup(popup);
     attachZoomLink(leafletObj, { pointZoom: 16 });
     leafletObj.addTo(state.layer);
-
-    if (leafletObj.getBounds) {
-      applyZOrderBySize(leafletObj);
-    }
 
     if (isDivisions && leafletObj.getBounds) {
       try {

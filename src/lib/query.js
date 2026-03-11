@@ -14,21 +14,48 @@ export function buildCacheSelect(parquetCols, key) {
 
   const defs = THEME_FIELDS[key] || [];
   const extraCols = [];
+  const searchableParts = [nameExpr];
+
   for (let i = 0; i < defs.length; i++) {
     if (parquetCols.has(defs[i].col)) {
-      extraCols.push(`CAST(${defs[i].sql} AS VARCHAR) as _f${i}`);
+      const castExpr = `CAST(${defs[i].sql} AS VARCHAR)`;
+      extraCols.push(`${castExpr} as _f${i}`);
+      // Include text-like fields in search_name for FTS indexing
+      if (isSearchableField(defs[i])) {
+        searchableParts.push(`COALESCE(${castExpr}, '')`);
+      }
     }
   }
+
+  // search_name: composed from name + searchable fields for richer FTS
+  const searchNameExpr = searchableParts.length > 1
+    ? `CONCAT_WS(' ', ${searchableParts.join(', ')})`
+    : nameExpr;
 
   return [
     'id',
     `${nameExpr} as display_name`,
+    `${searchNameExpr} as search_name`,
     'geometry',                                        // native GEOMETRY (WKB)
     'ST_GeometryType(geometry) as geom_type',
     'ST_X(ST_Centroid(geometry)) as centroid_lon',
     'ST_Y(ST_Centroid(geometry)) as centroid_lat',
     ...extraCols,
   ].join(',\n    ');
+}
+
+// Fields to EXCLUDE from FTS display_name composition.
+// Numeric fields aren't useful for text search. Address/URL/phone on places
+// add noise — use the addresses/address theme for location-based search.
+const EXCLUDE_LABELS = new Set([
+  'Height (m)', 'Floors', 'Min height', 'Elevation', 'Depth',
+  'Min depth', 'Max depth', 'Confidence', 'Min zoom', 'Max zoom',
+  'Speed limit', 'Population', 'Salt', 'Intermittent',
+  'Address', 'Website', 'Phone',
+]);
+
+function isSearchableField(def) {
+  return !EXCLUDE_LABELS.has(def.label);
 }
 
 // Build the SELECT used when reading rows for rendering.

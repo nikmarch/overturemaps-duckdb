@@ -9,7 +9,7 @@ import { getConn } from './duckdb.js';
 import { getMap } from './map.js';
 import { compilePipeline } from './pipeline.js';
 import { getThemeColor } from './themes.js';
-import { renderFeature } from './render.js';
+import { renderFeature, zOrderBySize } from './render.js';
 import { THEME_FIELDS } from './constants.js';
 import { tableHasFts } from './fts.js';
 
@@ -45,7 +45,7 @@ export async function runPipeline() {
 
   if (pipeline.length === 0) {
     clearPipelineLayer();
-    useStore.setState({ compiledSql: '', pipelineResult: null });
+    useStore.setState({ compiledSql: '', pipelineResult: null, pipelineRows: null });
     return;
   }
 
@@ -103,7 +103,12 @@ export async function runPipeline() {
       const fakeState = { key: src, layer: pipelineLayer, markers: [] };
 
       for (let i = 0; i < srcRows.length; i++) {
-        renderFeature(srcRows[i], fakeState, color, defs);
+        try {
+          renderFeature(srcRows[i], fakeState, color, defs);
+        } catch (e) {
+          // Skip individual bad features without breaking the batch
+          console.warn('renderFeature failed for row', srcRows[i]?.id, e?.message);
+        }
         // Yield to browser every 500 rows
         if (i > 0 && i % 500 === 0) {
           await new Promise(r => setTimeout(r, 0));
@@ -112,10 +117,14 @@ export async function runPipeline() {
       totalRendered += fakeState.markers.length;
     }
 
+    // Sort polygons: largest to back, smallest to front (clickable)
+    zOrderBySize(pipelineLayer);
+
     const durationMs = Math.round(performance.now() - t0);
     const fmtMs = durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`;
     useStore.setState({
       pipelineResult: { count: totalRendered, durationMs },
+      pipelineRows: rows,
       pipelineRunning: false,
       status: { text: `${totalRendered.toLocaleString()} results (${fmtMs})`, type: 'success' },
     });
@@ -123,6 +132,7 @@ export async function runPipeline() {
     const durationMs = Math.round(performance.now() - t0);
     useStore.setState({
       pipelineResult: { error: e.message, durationMs },
+      pipelineRows: null,
       pipelineRunning: false,
       status: { text: `Query error: ${e.message}`, type: 'error' },
     });

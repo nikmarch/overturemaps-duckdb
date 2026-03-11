@@ -21,7 +21,7 @@ export function buildNameFilterSql(tableName, q, { useFts = false } = {}) {
     return `fts_main_${tableName}.match_bm25(id, '${qq}')`;
   }
 
-  return `display_name ILIKE '%${qq}%'`;
+  return `search_name ILIKE '%${qq}%'`;
 }
 
 const FTS_PRESENT_CACHE = new Map();
@@ -52,10 +52,10 @@ export async function ensureFtsIndex(conn, tableName) {
   if (!conn || !tableName) return false;
 
   // PRAGMA expects the table name as a string literal.
-  // We assume the main table has columns: id, display_name
+  // We assume the main table has columns: id, search_name
   try {
     await conn.query(
-      `PRAGMA create_fts_index('${escapeSqlString(tableName)}', 'id', 'display_name', overwrite=1);`
+      `PRAGMA create_fts_index('${escapeSqlString(tableName)}', 'id', 'search_name', overwrite=1);`
     );
     // index creation implies helper tables exist
     FTS_PRESENT_CACHE.set(tableName, true);
@@ -82,9 +82,11 @@ export async function ftsSearchTable(conn, tableName, q, limit = 10) {
         display_name,
         centroid_lon,
         centroid_lat,
+        fts_main_${tableName}.match_bm25(id, '${qq}') AS _score,
         '${escapeSqlString(tableName)}' AS source_table
       FROM "${tableName}"
-      WHERE fts_main_${tableName}.match_bm25(id, '${qq}')
+      WHERE fts_main_${tableName}.match_bm25(id, '${qq}') IS NOT NULL
+      ORDER BY _score DESC
       LIMIT ${Number(limit) || 10}
     `)).toArray();
     return rows;
@@ -101,8 +103,8 @@ export async function ftsSearchTable(conn, tableName, q, limit = 10) {
         centroid_lat,
         '${escapeSqlString(tableName)}' AS source_table
       FROM "${tableName}"
-      WHERE display_name ILIKE '%${qq}%'
-      ORDER BY length(display_name) ASC
+      WHERE search_name ILIKE '%${qq}%'
+      ORDER BY length(search_name) ASC
       LIMIT ${Number(limit) || 10}
     `)).toArray();
     return rows;
