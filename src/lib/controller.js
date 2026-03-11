@@ -27,7 +27,7 @@ import { saveSnapviewMeta, loadAllSnapviewMeta, deleteSnapviewMeta, loadTableCac
 import { getConn, getDb } from './duckdb.js';
 import { ensureFtsIndex } from './fts.js';
 import { decodeStateFromUrl, initUrlSync } from './urlState.js';
-import { showBboxRect } from './drawBbox.js';
+import { showBboxRect, clearDrawnBbox } from './drawBbox.js';
 
 export { onReleaseChange as setRelease };
 export { toggleTheme };
@@ -316,11 +316,13 @@ export async function clearCache() {
   activeSnapviewId = null;
   useStore.setState({ activeSnapview: null });
 
+  clearDrawnBbox();
   clearSnapviews();
   clearIntersectionState();
   await dropAllTables();
   await clearAllTableCache();
   clearAllThemes();
+  useStore.setState({ pipeline: [], loadedTables: [], pipelineResult: null, pipelineRows: null, compiledSql: '', sqlOverride: null });
 
   const requests = Object.keys(themeState).map((key) => {
     const [theme, type] = key.split('/');

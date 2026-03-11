@@ -158,20 +158,21 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   transform: translateY(-1px);
 }
 .clear-cache-btn {
-  padding: 8px 14px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
   background: rgba(255, 255, 255, 0.9);
-  color: #666;
   border: 1px solid #ddd;
   border-radius: 10px;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 16px;
+  line-height: 36px;
+  text-align: center;
   cursor: pointer;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   transition: all 0.2s;
 }
 .clear-cache-btn:hover {
   background: #fff;
-  color: #d33;
   border-color: #d33;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
 }

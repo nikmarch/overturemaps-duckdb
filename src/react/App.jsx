@@ -87,7 +87,7 @@ export default function App() {
           onClick={clearCache}
           title="Clear all cached data"
         >
-          Clear Cache
+          &#x1F5D1;
         </button>
         <button
           className="load-area-btn"
