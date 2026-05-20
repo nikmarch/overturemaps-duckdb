@@ -4,6 +4,11 @@ services:
     working_dir: /app
     ports:
       - "8123:8123"
+    environment:
+      # Served under tools.zarbazan.work/maps/ via the main nginx proxy
+      # (see ~/code/zarbazan-infra/nginx/default.conf `location /maps/`).
+      # CF Pages deployments leave this unset and serve at root.
+      VITE_BASE: /maps/
     volumes:
       - ./:/app
       - ui_node_modules:/app/node_modules

@@ -1,4 +1,7 @@
-export const PROXY = '/maps/api';
+// Derives from Vite's base path so the same source supports both root-hosted
+// (maps.marchen.co, BASE_URL='/') and subpath-hosted (tools.zarbazan.work/maps/,
+// BASE_URL='/maps/') deployments without a code fork.
+export const PROXY = `${import.meta.env.BASE_URL}api`.replace(/\/+/g, '/');
 
 export const DEFAULT_VIEW = [34.05, -118.25];
 export const DEFAULT_ZOOM = 14;

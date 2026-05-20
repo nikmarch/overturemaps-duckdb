@@ -269,7 +269,7 @@ export async function loadTheme(key, snapviewId) {
       const fileKeys = await filesRes.json();
       const total = filesRes.headers.get('X-Total-Files') || '?';
       const filtered = filesRes.headers.get('X-Filtered-Files') || '?';
-      const files = fileKeys.map(k => `${location.origin}/maps/${k}`);
+      const files = fileKeys.map(k => `${location.origin}${import.meta.env.BASE_URL}${k}`.replace(/([^:]\/)\/+/g, '$1'));
       fileCount = files.length;
 
       const metaText = `${filtered}/${total}`;
