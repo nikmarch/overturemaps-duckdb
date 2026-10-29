@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { bboxFilter, buildCacheSelect } from '../query.js';
+import { THEME_FIELDS } from '../constants.js';
 
 describe('bboxFilter', () => {
   it('builds correct WHERE clause', () => {
@@ -105,5 +106,54 @@ describe('buildCacheSelect', () => {
     const displayMatch = sql.match(/(.+?) as display_name/)?.[1]?.trim() || '';
     expect(displayMatch).not.toContain('CONCAT_WS');
     expect(displayMatch).toContain('names.primary');
+  });
+
+  it('uses basic_category for Category when categories column is absent', () => {
+    const cols = new Set(['id', 'names', 'geometry', 'basic_category', 'taxonomy', 'confidence']);
+    const sql = buildCacheSelect(cols, 'places/place');
+    expect(sql).toContain('CAST(basic_category AS VARCHAR) as _f0');
+    expect(sql).not.toContain('categories.primary');
+    expect(sql).toContain('CAST(taxonomy.primary AS VARCHAR) as _f1');
+    const searchMatch = sql.match(/CONCAT_WS\(.+?\) as search_name/s)?.[0] || '';
+    expect(searchMatch).toContain('basic_category');
+    expect(searchMatch).toContain('taxonomy.primary');
+  });
+
+  it('falls back to categories.primary for Category on older releases', () => {
+    const cols = new Set(['id', 'names', 'geometry', 'categories', 'confidence']);
+    const sql = buildCacheSelect(cols, 'places/place');
+    expect(sql).toContain('CAST(categories.primary AS VARCHAR) as _f0');
+    expect(sql).not.toContain('basic_category');
+  });
+
+  it('prefers basic_category over categories when both exist', () => {
+    const cols = new Set(['id', 'names', 'geometry', 'categories', 'basic_category']);
+    const sql = buildCacheSelect(cols, 'places/place');
+    expect(sql).toContain('CAST(basic_category AS VARCHAR) as _f0');
+    expect(sql).not.toContain('categories.primary');
+  });
+
+  it('emits NULL placeholders for missing fields and preserves _f indexes', () => {
+    const cols = new Set(['id', 'names', 'geometry', 'confidence', 'brand']);
+    const sql = buildCacheSelect(cols, 'places/place');
+    const defs = THEME_FIELDS['places/place'];
+    for (let i = 0; i < defs.length; i++) expect(sql).toContain(` as _f${i}`);
+    expect(sql).toContain('NULL as _f0');
+    expect(sql).toContain('NULL as _f1');
+    expect(sql).toContain('CAST(ROUND(confidence, 2) AS VARCHAR) as _f2');
+    expect(sql).toContain('NULL as _f3');
+    expect(sql).toContain('NULL as _f4');
+    expect(sql).toContain('CAST(brand.names.primary AS VARCHAR) as _f5');
+    expect(sql).toContain('NULL as _f6');
+    const searchMatch = sql.match(/CONCAT_WS\(.+?\) as search_name/s)?.[0] || '';
+    expect(searchMatch).not.toContain('NULL');
+    expect(searchMatch).toContain('brand.names.primary');
+  });
+
+  it('search_name stays plain name when no searchable field is present', () => {
+    const cols = new Set(['id', 'names', 'geometry', 'confidence']);
+    const sql = buildCacheSelect(cols, 'places/place');
+    expect(sql).not.toContain('CONCAT_WS');
+    expect(sql).toMatch(/names\.primary.+?as search_name/s);
   });
 });

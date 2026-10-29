@@ -17,13 +17,16 @@ export function buildCacheSelect(parquetCols, key) {
   const searchableParts = [nameExpr];
 
   for (let i = 0; i < defs.length; i++) {
-    if (parquetCols.has(defs[i].col)) {
-      const castExpr = `CAST(${defs[i].sql} AS VARCHAR)`;
-      extraCols.push(`${castExpr} as _f${i}`);
-      // Include text-like fields in search_name for FTS indexing
-      if (isSearchableField(defs[i])) {
-        searchableParts.push(`COALESCE(${castExpr}, '')`);
-      }
+    const src = resolveFieldSource(defs[i], parquetCols);
+    if (!src) {
+      extraCols.push(`NULL as _f${i}`);
+      continue;
+    }
+    const castExpr = `CAST(${src.sql} AS VARCHAR)`;
+    extraCols.push(`${castExpr} as _f${i}`);
+    // Include text-like fields in search_name for FTS indexing
+    if (isSearchableField(defs[i])) {
+      searchableParts.push(`COALESCE(${castExpr}, '')`);
     }
   }
 
@@ -56,6 +59,11 @@ const EXCLUDE_LABELS = new Set([
 
 function isSearchableField(def) {
   return !EXCLUDE_LABELS.has(def.label);
+}
+
+function resolveFieldSource(def, parquetCols) {
+  const sources = [def, ...(def.fallbacks || [])];
+  return sources.find(s => parquetCols.has(s.col)) || null;
 }
 
 // Build the SELECT used when reading rows for rendering.
