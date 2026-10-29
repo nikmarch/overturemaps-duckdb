@@ -6,19 +6,21 @@ import LoadModal from './components/LoadModal';
 import ProgressOverlay from './components/ProgressOverlay';
 import QueryStatusHud from './components/QueryStatusHud';
 import { loadArea, initSnapviewHistory, restoreFromUrl, initUrlSync, clearCache } from '../lib/controller.js';
-import { initMap } from '../lib/map.js';
+import { getMap, initMap } from '../lib/map.js';
 import { initDuckDB } from '../lib/duckdb.js';
 import { initSessionTable, restoreSession, initSessionSync } from '../lib/sessionState.js';
 import { loadReleases } from '../lib/themes.js';
 import { initSnapviewsLayer } from '../lib/snapviews.js';
 import { initPipelineRunner } from '../lib/pipelineRunner.js';
 import { startDraw } from '../lib/drawBbox.js';
+import { getUserLocation } from '../lib/userLocation.js';
 import { useStore } from '../lib/store.js';
 
 export default function App() {
   const [modalOpen, setModalOpen] = useState(false);
   const [tableOpen, setTableOpen] = useState(false);
   const [drawing, setDrawing] = useState(false);
+  const [locating, setLocating] = useState(false);
   const [initialized, setInitialized] = useState(false);
   const hasPipeline = useStore(s => s.pipeline.length > 0);
 
@@ -61,6 +63,20 @@ export default function App() {
     );
   }, []);
 
+  const handleLocate = useCallback(async () => {
+    setLocating(true);
+    useStore.setState({ status: { text: 'Asking browser for location...', type: 'loading' } });
+    try {
+      const { lat, lon } = await getUserLocation();
+      getMap()?.setView([lat, lon], 14);
+      useStore.setState({ status: { text: 'Map centered on your location', type: 'success' } });
+    } catch (e) {
+      useStore.setState({ status: { text: e.message, type: 'error' } });
+    } finally {
+      setLocating(false);
+    }
+  }, []);
+
   function handleLoad(keys) {
     const bbox = useStore.getState().pipelineBbox;
     if (bbox) loadArea(keys, bbox);
@@ -83,11 +99,12 @@ export default function App() {
       )}
       <div className="bottom-right-btns">
         <button
-          className="clear-cache-btn"
-          onClick={clearCache}
-          title="Clear all cached data"
+          className="locate-btn"
+          onClick={handleLocate}
+          disabled={locating || !initialized}
+          title="Use browser location and jump map there"
         >
-          &#x1F5D1;
+          {locating ? 'Locating...' : 'Use current location'}
         </button>
         <button
           className="load-area-btn"
@@ -96,6 +113,13 @@ export default function App() {
           title="Draw rectangle to select area and load themes"
         >
           {drawing ? 'Drawing...' : 'Select Area'}
+        </button>
+        <button
+          className="clear-cache-btn"
+          onClick={clearCache}
+          title="Clear all cached data"
+        >
+          &#x1F5D1;
         </button>
       </div>
       <LoadModal open={modalOpen} onClose={() => setModalOpen(false)} onLoad={handleLoad} />

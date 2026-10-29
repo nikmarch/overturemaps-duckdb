@@ -140,7 +140,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   gap: 8px;
   align-items: center;
 }
-.load-area-btn {
+.load-area-btn,
+.locate-btn {
   padding: 10px 20px;
   background: #007bff;
   color: white;
@@ -152,12 +153,20 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
   transition: all 0.2s;
 }
-.load-area-btn:hover:not(:disabled) {
+.locate-btn {
+  background: #198754;
+}
+.load-area-btn:hover:not(:disabled),
+.locate-btn:hover:not(:disabled) {
   background: #0056b3;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
   transform: translateY(-1px);
 }
-.load-area-btn:disabled {
+.locate-btn:hover:not(:disabled) {
+  background: #146c43;
+}
+.load-area-btn:disabled,
+.locate-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
