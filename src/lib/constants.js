@@ -23,7 +23,9 @@ export const DEFAULT_COLOR = { fill: '#95a5a6', stroke: '#7f8c8d' };
 
 export const THEME_FIELDS = {
   'places/place': [
-    { col: 'categories', sql: 'categories.primary', label: 'Category' },
+    { col: 'basic_category', sql: 'basic_category', label: 'Category',
+      fallbacks: [{ col: 'categories', sql: 'categories.primary' }] },
+    { col: 'taxonomy', sql: 'taxonomy.primary', label: 'Taxonomy' },
     { col: 'confidence', sql: 'ROUND(confidence, 2)', label: 'Confidence' },
     { col: 'websites', sql: 'websites[1]', label: 'Website' },
     { col: 'phones', sql: 'phones[1]', label: 'Phone' },
