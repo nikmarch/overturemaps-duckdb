@@ -8,17 +8,22 @@ env:
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
+permissions:
+  contents: read
+
 jobs:
   cleanup:
-    if: github.event.pull_request.merged == true
+    if: github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - name: Compute worker name
         id: vars
+        env:
+          PR_HEAD_REF: ${{ github.head_ref }}
         run: |
-          BRANCH="${{ github.head_ref }}"
+          BRANCH="$PR_HEAD_REF"
           SANITIZED=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//' | cut -c1-44)
-          echo "worker_name=overture-s3-proxy-${SANITIZED}" >> $GITHUB_OUTPUT
+          echo "worker_name=overture-s3-proxy-${SANITIZED}" >> "$GITHUB_OUTPUT"
 
       - name: Delete preview worker
         run: |
@@ -29,8 +34,10 @@ jobs:
             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" | jq -r '.success'
 
       - name: Delete preview Pages deployments
+        env:
+          PR_HEAD_REF: ${{ github.head_ref }}
         run: |
-          BRANCH="${{ github.head_ref }}"
+          BRANCH="$PR_HEAD_REF"
           PROJECT="overture-maps"
 
           DEPLOYMENTS=$(curl -s "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT/deployments" \
